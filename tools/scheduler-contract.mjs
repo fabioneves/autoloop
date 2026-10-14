@@ -3866,9 +3866,7 @@ sys.exit(result if result is not None and result>=0 else 128+abs(result or 1))
       refuses('STATE_INVALID', () => acquireScheduler(repository, { ...pins, runId: randomUUID() }, initiator));
     });
     await check('simultaneous linked-worktree contenders yield one owner and one checkpoint writer', async () => {
-      const { repository, pins, state } = fixture();
-      const linkedRoot = join(dirname(repository.coordinatorRoot), 'linked');
-      git('-C', repository.coordinatorRoot, 'worktree', 'add', '-q', '--detach', linkedRoot, 'HEAD');
+      const rounds = 32; const sampleStarted = performance.now();
       const script = `const api = await import(process.argv[1]);
         const repository = api.resolveRepository(process.argv[2]); const pins = JSON.parse(process.argv[3]);
         let acquired;
@@ -3878,26 +3876,54 @@ sys.exit(result if result is not None and result>=0 else 128+abs(result or 1))
               acquired = api.acquireScheduler(repository, pins, { kind: 'terminal', sessionId: null, process: api.readProcessIdentity() });
               api.commitTransition(acquired.lease, 1, (value) => ({ ...value, state: 'paused', desiredState: 'paused' }));
               process.send({ ok: true, pid: process.pid });
-            } catch (error) { process.send({ ok: false, code: error.code }, () => process.disconnect()); }
+            } catch (error) { process.send({ ok: false, pid: process.pid, code: error.code, message: error.message,
+              stack: error.stack, owner: error.owner ?? null }, () => process.disconnect()); }
           } else if (command === 'finish') {
             api.commitTransition(acquired.lease, 2, (value) => ({ ...value, state: 'stopped', desiredState: 'stopped' }));
             api.releaseScheduler(acquired.lease); process.disconnect();
           }
         }); process.send({ ready: true });`;
-      const contenders = Array.from({ length: 4 }, (_, index) => startChild(script,
-        [moduleUrl, index % 2 === 0 ? repository.coordinatorRoot : linkedRoot, JSON.stringify(pins)]));
-      await Promise.all(contenders.map(message));
-      const answers = contenders.map(message);
-      for (const child of contenders) child.send('go');
-      const returned = await Promise.all(answers);
-      assert.equal(returned.filter((value) => value.ok).length, 1);
-      assert(returned.filter((value) => !value.ok).every((value) => value.code === 'SCHEDULER_ACTIVE'));
-      const checkpoint = readCheckpoint(repository, pins.runId);
-      assert.equal(checkpoint.revision, 2);
-      assert.equal(checkpoint.owner.pid, returned.find((value) => value.ok).pid);
-      assert.deepEqual(readdirSync(join(state, 'lock')), ['1.json']);
-      contenders[returned.findIndex((value) => value.ok)].send('finish');
-      await Promise.all(contenders.map((child) => child.finished));
+      for (let round = 1; round <= rounds; round += 1) {
+        const roundStarted = performance.now(); const { repository, pins, state } = fixture();
+        const linkedRoot = join(dirname(repository.coordinatorRoot), 'linked');
+        git('-C', repository.coordinatorRoot, 'worktree', 'add', '-q', '--detach', linkedRoot, 'HEAD');
+        const contenders = Array.from({ length: 4 }, (_, index) => startChild(script,
+          [moduleUrl, index % 2 === 0 ? repository.coordinatorRoot : linkedRoot, JSON.stringify(pins)]));
+        const returned = []; let failed = false;
+        const diagnostics = () => 'Contender results: ' + JSON.stringify({ round, rounds,
+          roundElapsedMs: Math.round(performance.now() - roundStarted), sampleElapsedMs: Math.round(performance.now() - sampleStarted),
+          outcomes: contenders.map((child, index) => returned[index] ?? { pid: child.pid, pending: true,
+            exitCode: child.exitCode, signal: child.signalCode, error: child.errorText }) });
+        try {
+          await Promise.all(contenders.map(message));
+          const answers = contenders.map((child, index) => message(child).then((value) => { returned[index] = value; }));
+          for (const child of contenders) child.send('go');
+          await Promise.all(answers);
+          const details = diagnostics();
+          assert.equal(returned.filter((value) => value.ok).length, 1, details);
+          assert(returned.filter((value) => !value.ok).every((value) => value.code === 'SCHEDULER_ACTIVE'), details);
+          const checkpoint = readCheckpoint(repository, pins.runId);
+          assert.equal(checkpoint.revision, 2, details);
+          assert.equal(checkpoint.owner.pid, returned.find((value) => value.ok).pid, details);
+          assert.deepEqual(readdirSync(join(state, 'lock')), ['1.json'], details);
+        } catch (error) {
+          failed = true;
+          if (!error.message.includes('Contender results: ')) error.message += ' ' + diagnostics();
+          throw error;
+        } finally {
+          const ended = await Promise.all(contenders.map(async (child, index) => {
+            if (returned[index]?.ok) {
+              if (child.connected) child.send('finish', () => {});
+            } else await endChild(child);
+            return child.finished;
+          }));
+          if (!failed) {
+            const winner = returned.findIndex((value) => value.ok);
+            assert.equal(ended[winner].code, 0, diagnostics());
+          }
+        }
+      }
+      console.log(`Contender sample: ${rounds} rounds completed in ${Math.round(performance.now() - sampleStarted)}ms.`);
     });
     await check('dead-owner recovery and a crashed successor retain a surviving bound worker', async () => {
       const { repository, pins, initiator, state } = fixture();
