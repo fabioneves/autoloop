@@ -3,18 +3,31 @@
 // terminal before exec, without changing admission checks or the environment.
 import { spawn } from 'node:child_process';
 
-const adapter = `import errno, os, pty, select, signal, subprocess, sys
+const adapter = `import errno, os, pty, select, signal, subprocess, sys, time
 
+# Share the existing fixture deadline; observation must not extend it.
+deadline = time.monotonic() + max(0, float(sys.argv[1]) / 1000 - time.time())
 pid, master = pty.fork()
 if pid == 0:
-    os.execvp(sys.argv[1], sys.argv[1:])
+    os.execvp(sys.argv[2], sys.argv[2:])
 
-def zombie_only_group():
-    # WNOWAIT reserves the child's PID while the group is inspected.
-    exited = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-    if exited is None or exited.si_pid != pid:
-        return False
-    snapshot = subprocess.check_output(['ps', '-axo', 'pid=,pgid=,stat='], text=True, timeout=5)
+def require_zombie_only_group():
+    # XNU closes the PTY before publishing the exit to waitid. WNOWAIT
+    # reserves the child's PID while that observation becomes available.
+    while True:
+        exited = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if exited is not None:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError('The PTY child exit is not observable before the fixture deadline.')
+        time.sleep(min(0.01, remaining))
+    if exited.si_pid != pid:
+        raise RuntimeError('The PTY exit observation names another child.')
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError('The PTY group proof reached the fixture deadline.')
+    snapshot = subprocess.check_output(['ps', '-axo', 'pid=,pgid=,stat='], text=True, timeout=min(5, remaining))
     found_child = False
     for line in snapshot.splitlines():
         fields = line.split()
@@ -23,9 +36,10 @@ def zombie_only_group():
         member, group, state = fields
         if int(group) == pid:
             if not state.startswith('Z'):
-                return False
+                raise RuntimeError('The PTY group has a live or unknown member: ' + line.strip())
             found_child = found_child or int(member) == pid
-    return found_child
+    if not found_child:
+        raise RuntimeError('The PTY group snapshot does not contain the owned zombie.')
 
 def stop(signum, frame):
     raise SystemExit(128 + signum)
@@ -63,10 +77,9 @@ finally:
         except ProcessLookupError:
             pass
         except PermissionError:
-            # XNU filters SZOMB members and returns EPERM for a zombie-only
-            # group. A live child, descendant, or unknown snapshot must fail.
-            if not zombie_only_group():
-                raise
+            # XNU can return EPERM during exit or for a zombie-only group.
+            # Require a published exit and no live group member before reaping.
+            require_zombie_only_group()
     except Exception as error:
         # Reap the owned child on failure, but do not claim group cleanup.
         try:
@@ -88,7 +101,8 @@ sys.exit(code if code >= 0 else 128 - code)
 `;
 
 export function spawnTestTerminal(argv, { env = process.env } = {}) {
-  const child = spawn('python3', ['-I', '-u', '-c', adapter, ...argv], {
+  const deadline = Date.now() + 15000;
+  const child = spawn('python3', ['-I', '-u', '-c', adapter, String(deadline), ...argv], {
     env, stdio: ['pipe', 'pipe', 'pipe'],
   });
   child.output = '';
@@ -100,11 +114,10 @@ export function spawnTestTerminal(argv, { env = process.env } = {}) {
   child.stdin.on('error', (error) => { child.errors += error.message; });
   child.closed = new Promise((done) => child.once('close', (code, signal) => done({ code, signal })));
   child.cleanup = () => child.kill('SIGTERM');
-  const deadline = Date.now() + 15000;
   const timeout = setTimeout(() => {
     child.errors += 'Terminal fixture timed out.';
     child.cleanup();
-  }, 15000);
+  }, Math.max(0, deadline - Date.now()));
   child.closed.then(() => clearTimeout(timeout));
   child.waitForOutput = async (text) => {
     while (!child.output.includes(text)) {
