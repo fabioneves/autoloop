@@ -203,17 +203,28 @@ async function selfTest() {
       assert.equal(scheduler.readSchedulerOwner(repo).state, 'dead');
       assert.equal(legacy(repo).error?.code, 'SCHEDULER_ACTIVE');
     });
-    await check('dead and reused legacy owners permit start; missing identity does not become dead', () => {
-      for (const mode of ['dead', 'reused', 'unknown']) {
+    await check('dead and reused legacy owners permit start; malformed and missing identities do not become dead', () => {
+      for (const mode of ['dead', 'reused', 'malformed', 'unknown', 'missing']) {
         const repo = repository();
         const directory = join(repo.commonDir, 'autoloop', 'run'); mkdirSync(directory, { recursive: true });
         const owner = scheduler.readProcessIdentity();
         if (mode === 'dead') owner.pid = 2147483647;
-        if (mode === 'reused') owner.start = String(Number(owner.start) + 1);
+        if (mode === 'reused') {
+          // Keep the OS format: Linux ticks or macOS ps lstart in C/UTC.
+          const oldStart = owner.bootId.startsWith('darwin:') ? 'Mon Jan 1 00:00:00 1990' : '0';
+          assert.notEqual(oldStart, owner.start);
+          owner.start = oldStart;
+          assert.equal(scheduler.processIdentityState(owner), 'dead');
+        }
+        if (mode === 'malformed') owner.start = 'NaN';
         if (mode === 'unknown') owner.start = null;
+        if (mode === 'missing') delete owner.start;
         writeFileSync(join(directory, 'fixture.json'), JSON.stringify({ version: 1, pids: [owner.pid], starts: { [owner.pid]: owner.start }, owner, sessionId: randomUUID() }));
-        if (mode === 'unknown') assert.throws(() => start(repo), (error) => error.code === 'OWNER_UNVERIFIED');
-        else stop(repo, start(repo));
+        if (['malformed', 'unknown', 'missing'].includes(mode)) {
+          assert.throws(() => start(repo), (error) => error.code === 'OWNER_UNVERIFIED');
+          assert.equal(scheduler.readCurrentCheckpoint(repo), null);
+          assert.equal(scheduler.readSchedulerOwner(repo).state, 'absent');
+        } else stop(repo, start(repo));
       }
     });
     await check('a contender cannot pass ownership checks while the other holds admission, in either direction', async () => {
