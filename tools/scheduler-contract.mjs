@@ -2389,8 +2389,8 @@ process.on('disconnect', () => process.exit(0));\n${script}`;
         reservations: value.reservations.map((item) => item.unitId !== intent.unitId ? item : { ...item, state: 'admitted', paths: artifact.boundary }) }));
       return { lease, setup, data, worktree, artifact, proposed, taskText, checkpoint, linkedEvidence };
     }
-    function startPlanningTask(api, root, expected, isolated = true, descendant = false, fromPath = false) {
-      const child = spawn(fromPath ? 'node' : process.execPath, ['--input-type=module', '-e', `import assert from 'node:assert/strict';
+    function startPlanningTask(api, root, expected, isolated = true, descendant = false, fromPath = false, executable = process.execPath) {
+      const child = spawn(fromPath ? 'node' : executable, ['--input-type=module', '-e', `import assert from 'node:assert/strict';
         import {readFileSync} from 'node:fs';import {join} from 'node:path';import {spawn} from 'node:child_process';
         const hold=setInterval(()=>{},1000);process.on('message', message=>{if(message!=='run')return;
           clearInterval(hold);process.stdout.write('fixture stdout\\n');process.stderr.write('fixture stderr\\n');
@@ -2517,8 +2517,38 @@ process.on('disconnect', () => process.exit(0));\n${script}`;
         await endChild(shared);
         const pathTask = startPlanningTask(api, ctx.worktree.root, 'required\n', true, false, true);
         pathTask.fixtureObservation = 'PATH launch'; tasks.push(pathTask); await pathTask.ready;
-        const pathObservation = observe(pathTask); pathTask.send('run');
-        assert.equal((await pathObservation.completion).status, 'verified-failure'); await pathTask.finished;
+        const pathEntry = procEntry(pathTask.pid); let pathExecutable = null;
+        try { if (pathEntry?.[2]) pathExecutable = realpathSync(pathEntry[2]); } catch { /* unknown executable must refuse */ }
+        assert.equal(pathTask._handle?.pid, pathTask.pid); assert.equal(pathEntry?.[0], process.pid);
+        assert.equal(processGroupOf(pathTask.pid), pathTask.pid); assert.equal(processStart(pathTask.pid), pathTask.started);
+        if (pathExecutable !== null) {
+          assert.equal(pathExecutable, setup.pins.nodePath);
+          const pathObservation = observe(pathTask); pathTask.send('run');
+          assert.equal((await pathObservation.completion).status, 'verified-failure'); await pathTask.finished;
+        } else {
+          // PATH spelling is not executable proof. Some hosts cannot observe
+          // this child's image; refusal must not register a relationship.
+          const before = readSchedulerContext(ctx.lease).checkpoint;
+          refuses('OWNER_UNVERIFIED', () => observe(pathTask));
+          assert.deepEqual(readSchedulerContext(ctx.lease).checkpoint, before); await endChild(pathTask);
+        }
+        const { copyFileSync, chmodSync } = await import('node:fs');
+        const hiddenDirectory = join(setup.home, 'unresolvable-node'); mkdirSync(hiddenDirectory, { mode: 0o700 });
+        const hiddenExecutable = join(hiddenDirectory, 'node'); copyFileSync(setup.pins.nodePath, hiddenExecutable);
+        const hiddenTask = startPlanningTask(api, ctx.worktree.root, 'required\n', true, false, false, hiddenExecutable);
+        hiddenTask.fixtureObservation = 'unresolvable executable'; tasks.push(hiddenTask); await hiddenTask.ready;
+        try {
+          // A real native child stays live after directory traversal is denied.
+          // This tests unknown executable refusal, not Darwin emulation.
+          chmodSync(hiddenDirectory, 0);
+          assert.throws(() => realpathSync(hiddenExecutable), (error) => error.code === 'EACCES');
+          assert.equal(hiddenTask._handle?.pid, hiddenTask.pid); assert.equal(procEntry(hiddenTask.pid)?.[0], process.pid);
+          assert.equal(processGroupOf(hiddenTask.pid), hiddenTask.pid); assert.equal(processStart(hiddenTask.pid), hiddenTask.started);
+          assert.equal(hiddenTask.exitCode, null); assert.equal(hiddenTask.signalCode, null);
+          const before = readSchedulerContext(ctx.lease).checkpoint;
+          refuses('OWNER_UNVERIFIED', () => observe(hiddenTask));
+          assert.deepEqual(readSchedulerContext(ctx.lease).checkpoint, before);
+        } finally { chmodSync(hiddenDirectory, 0o700); await endChild(hiddenTask); }
         const zero = await recordFor('zero exit', 'actual fixture contents\n', async (task) => {
           task.send('run'); await task.finished;
           const current = readSchedulerContext(ctx.lease).checkpoint;
