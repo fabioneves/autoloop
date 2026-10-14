@@ -125,7 +125,10 @@ Daemon controls use `<common-dir>/autoloop/control/v2/{requests,pending,processi
 `requests/<request-id>.json` is the immutable transport identity across all queue phases.
 Legacy controls stay in the existing locations. Never pass a v2 request to `takeControls`' v1
 consumer. Regular files and real directories only; no links, FIFOs or traversal components.
-Create private directories/files with modes `0700`/`0600`. Verify paths on open descriptors.
+Create private directories/files with modes `0700`/`0600`. Verify type, owner and private
+permissions on opened descriptors, including existing stores and records. Refuse unsafe paths;
+never silently chmod them. Shared Git-admin/legacy ancestors may retain owned `0755` modes,
+but daemon storage ancestors must not be writable by other accounts.
 Protect scheduler, control and worktree Git-admin state through aliases as well as literal paths.
 
 ## Executable data contracts
@@ -187,6 +190,9 @@ it does not manufacture production workers. Register a binding before model tool
 Store each transaction as one complete checkpoint. Write an exclusive temporary regular file,
 flush it, rename it atomically, then flush the parent directory before reporting durability.
 Apply the same rule to pins and the current pointer. Publish pins/checkpoint before the pointer.
+Flush the parent entry of each newly created authoritative directory before publishing anything
+that depends on it. This includes run, lease, control and launch directories. Failed directory
+flushes are state failures, not successful durability. Retried creation also establishes parent durability.
 The checkpoint contains request claims, outcomes and outbox together; separate request files are
 transport copies. A crash between files cannot create an applied request absent from the checkpoint.
 An invalid authoritative checkpoint is a visible recovery failure, never an empty queue.
@@ -197,6 +203,15 @@ The repository lifetime lock is exclusive and held through drain, reconciliation
 Use a verified OS locking primitive or equivalent atomic exclusion with fencing. A PID file,
 check-then-create, timeout-based stale deletion, or untested copied stale-lock algorithm is insufficient.
 Do not reclaim a lock merely because its timestamp is old. Concurrent starts must have one winner.
+
+The short shared admission ledger lives in the protected OS-account runtime at
+`.claude/autoloop/execution-admission/<repositoryKey>/`. It uses the same immutable election
+and fencing. This moves only admission coordination, not checkpoints, lifetime leases or controls.
+Before the first daemon lease, publish and flush immutable `daemon-authority.json` there.
+Missing, corrupt or unsafe established Git authority is a recovery refusal, never absent state.
+Do not prune or reset this marker. Never-daemon legacy repositories can keep existing `0775`
+Git-admin modes for legacy startup and pure status reads; daemon activation still requires safe
+ancestors and private daemon stores. An environment variable cannot redirect this authority.
 
 Both start paths use the same atomic repository admission gate. Legacy prime publishes its owner
 marker while holding the gate. Daemon start publishes its lock/starting record while holding it.
@@ -267,6 +282,13 @@ readback of the actual target. Reconcile `applied|not-applied|unknown`; only ver
 permits retry. Persist the receipt and linked outcome in one checkpoint transaction.
 Local pause/stop intent can be replayed by reduction. Remote effects cannot.
 
+Prepared, in-flight and unknown effects all prevent an unaccounted fresh run. Prepared means
+not invoked; it must not be called unknown merely because it is retained. Under the current lease
+and recorded desired-stopped intent, an uninvoked non-cancellation effect may be failed explicitly
+as `STOPPED_BEFORE_LAUNCH`. Preserve its intent, attempt and receipts. Invoked/unknown effects
+still require readback; prepared cancellation cannot take this abandonment path. Runtime stop,
+launch selection, supervisor recovery and shared legacy admission use the same unresolved predicate.
+
 Recovery has one narrow exception for a new explicit `stop-now` intent. A new `process.cancel`
 effect at attempt 1 may be prepared and started while other effects are unknown only when:
 - The stored request is processing, belongs to the current run, and was claimed in the current
@@ -283,6 +305,10 @@ all other effects and unknown-operation retries remain blocked. No general recov
 is permitted. Prior unknown operations retain their intents and outcomes until verified readback.
 A stop-now outcome is applied only after every retained target group has confirmed exit. Unknown
 or live targets keep the outcome processing/unknown; the first settled effect cannot complete it.
+Process the full retained target set even if an earlier target is unknown. Stop each verified group,
+retain unverified groups, and settle the aggregate only after the pass. The internal `deferControl`
+settlement option applies only to the current processing immediate-stop request; it adds no signal
+permission. Target ordering and a restart cannot cause a later verified group to be skipped.
 If an exact retained cancellation target exits after preparation but before execution, reconcile
 its desired state from confirmed process and group absence. Record `GROUP_ALREADY_EXITED`, not
 successful signal delivery. This permits only prepared `process.cancel` attempt 1 with the same
@@ -474,6 +500,10 @@ and direct submissions receive `UNSUPPORTED_ACTION`. The daemon protocol uses `r
 legacy UI's `unpause` maps to it only in daemon mode. Existing legacy requests remain v1.
 Display starting, running, paused, draining, recovering, stopped and failed
 without mapping them to guessed success. A missing/dead owner cannot display as running.
+Daemon dispatch state is `running|died|unknown`, from group observation `alive|empty|unknown`.
+Unknown bindings count as waiting and remain visible/selectable without log or cached output.
+Unknown does not authorize tailing, cancellation, a running glyph or completion. Existing legacy
+dispatch values and the `autoloop.status/1` envelope stay unchanged.
 For daemon controls do not submit `autoloop: control` wake prompts. Legacy controls retain them.
 
 ## Code style
@@ -496,6 +526,15 @@ Use existing verification process-group cleanup and resource-capped test units. 
 recursive self-tests or target a live service. Test resources have unique names and scratch roots.
 Supervisor positive lifecycle tests require the real default test cgroup cap. Without that cap,
 they report a capability skip; refusal tests still run. macOS reports Linux-supervision skips.
+The verifier surfaces those skip lines even when the child exits successfully. Linux CI also runs
+`node tools/loop-supervisor.mjs --self-test --require-supervision` under the real test cap; this
+mode fails rather than skipping positive supervision coverage. Read-only workflow permissions stay unchanged.
+Prove the two-tick control-claim bound using the production one-second tick while real long child
+work, delayed external effects or asynchronous cancellation remain active.
+
+Account-dependent fixtures use the scoped test-account provider before any acquisition, including
+parent processes and child Node processes. Restore OS exports, child preload settings and umask in
+`finally`. Fixture isolation is not a production environment or command-line authority override.
 Runtime and supervisor tests stop verified owned processes and retain scratch files when removal
 is not permitted in the execution context. Each retained path is reported. Never remove projects,
 live state, real worktrees, plugin caches or unrelated temporary data.
