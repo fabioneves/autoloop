@@ -196,7 +196,8 @@ On a supported Linux host, `/autoloop start` requests a named systemd user servi
 its process identity, ownership and applied resource limits before it reports readiness. There is
 no uncapped fallback and no daemon runtime deadline. Daemon activation requires owned Git-admin
 ancestors without group/other write permission and private scheduler/control storage. Unsafe existing
-permissions are refused, never changed automatically. Legacy startup keeps its existing permissions.
+permissions are refused, never changed automatically. Legacy startup still accepts shared Git-directory
+modes. Both upgraded start paths require a private OS-account admission store with safe ancestors.
 `/autoloop attach` connects a viewer to an existing run; discovery alone does not attach.
 `/autoloop disconnect` and session exit end only
 that viewer's attachment. Closing the pane does not stop the run.

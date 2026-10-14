@@ -38,7 +38,8 @@ Notable changes to Autoloop are recorded here. The format follows
 - Daemon storage checks ownership and permissions on open directory and record descriptors.
   Shared ancestors must not be writable by other accounts; scheduler and control storage
   must be private. Unsafe state is refused without automatic permission changes or migration.
-  Legacy startup retains its existing permission rules.
+  Legacy startup still accepts shared Git-directory modes. Both upgraded start paths require
+  a private OS-account admission store with safe ancestors.
 - Authoritative directory parents are flushed before state publication. Failed or unsupported
   filesystem synchronization prevents publication.
 - Immediate stop checks all verified owned worker targets before it records completion.
