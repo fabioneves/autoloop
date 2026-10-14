@@ -287,7 +287,15 @@ async function fakeGitHub() {
   send({ data: { repository } });
 }
 
-async function selfTest() {
+const SELECTION_SELF_TEST_GROUPS = Object.freeze(['foundation', 'boundary']);
+const selectionTestGroup = (name) => name.startsWith('boundary:') ? 'boundary' : 'foundation';
+
+async function selfTest(group = null) {
+  const filter = group === null ? process.env.SELECTION_TEST_FILTER : undefined;
+  if (filter !== undefined && filter.trim().length === 0) {
+    console.error('The focused selection test filter must not be empty.');
+    return false;
+  }
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'scheduler-selection-')));
   const account = await scheduler.createSchedulerTestAccount(scratch);
   const originalPath = process.env.PATH;
@@ -295,6 +303,7 @@ async function selfTest() {
   const fixtures = {};
   const fixturePath = join(scratch, 'github.json');
   const results = [];
+  const declared = [];
   const owned = [];
   const children = new Set();
   const git = (root, ...args) => {
@@ -307,7 +316,11 @@ async function selfTest() {
     writeFileSync(fixturePath, JSON.stringify(fixtures));
   };
   const check = async (name, action) => {
-    if (process.env.SELECTION_TEST_FILTER && !name.includes(process.env.SELECTION_TEST_FILTER)) return;
+    assert.equal(typeof name, 'string');
+    assert(name.length > 0 && !declared.includes(name), 'Selection test names must be nonempty and unique.');
+    declared.push(name);
+    if (group !== null && selectionTestGroup(name) !== group) return;
+    if (filter !== undefined && !name.includes(filter)) return;
     const startedAt = process.hrtime.bigint();
     console.error(`selection case START ${name}`);
     try { await action(); results.push([name, true]); }
@@ -452,6 +465,19 @@ process.send('ready');`, target], { cwd: selection.worktree.root, detached: true
       assert.equal(imported.status, 0, imported.stderr);
       const { UNIVERSAL_TOOL_FILES } = await import('./verify.mjs');
       assert(UNIVERSAL_TOOL_FILES.includes('scheduler-selection.mjs'));
+    });
+    await check('test groups: invalid and empty selectors cannot reduce a run to no cases', async () => {
+      const path = fileURLToPath(import.meta.url);
+      for (const args of [['--self-test', '--group', ''], ['--self-test', '--group', 'unknown'], ['--self-test', '--group']]) {
+        const result = spawnSync(process.execPath, [path, ...args], { encoding: 'utf8', timeout: 5000 });
+        assert.equal(result.status, 2, result.stderr);
+      }
+      for (const filter of ['', '   ', 'no selection case has this exact phrase']) {
+        const result = spawnSync(process.execPath, [path, '--self-test'], {
+          encoding: 'utf8', timeout: 5000, env: { ...process.env, SELECTION_TEST_FILTER: filter },
+        });
+        assert.equal(result.status, 1, result.stderr);
+      }
     });
     await check('complete actual collector evidence reserves an immutable pair without changing coordinator Git', async () => {
       const setup = fixture();
@@ -1644,7 +1670,15 @@ await allocator.allocateWorktree(acquired.lease, reservation.unitId, baseOid);`;
     // Retain fixtures when recursive cleanup is not approved by the host.
     console.log(`Fixtures retained at ${scratch}`);
   }
-  const passed = results.length > 0 && results.every(([, ok]) => ok);
+  const executed = results.map(([name]) => name);
+  // Group coverage does not depend on the focused-debug filter.
+  const expected = declared.filter((name) => group === null
+    ? filter === undefined || name.includes(filter)
+    : selectionTestGroup(name) === group);
+  const complete = executed.length === expected.length && executed.every((name, index) => name === expected[index]);
+  if (!complete) console.error('FAIL selection case coverage: the executed names do not match the selected declarations.');
+  console.log(`selection cases: ${JSON.stringify({ group: group ?? 'all', filter: filter ?? null, declared, executed })}`);
+  const passed = complete && results.length > 0 && results.every(([, ok]) => ok);
   console.log(passed ? `self-test OK (${results.length} cases)` : 'self-test FAILED');
   return passed;
 }
@@ -1655,7 +1689,11 @@ const isMain = (() => {
   catch { return false; }
 })();
 if (isMain) {
-  if (process.argv.length === 3 && process.argv[2] === '--self-test') process.exit(await selfTest() ? 0 : 1);
-  console.error('usage: scheduler-selection.mjs --self-test');
+  const args = process.argv.slice(2);
+  if (args[0] === '--self-test' && (args.length === 1
+    || args.length === 3 && args[1] === '--group' && SELECTION_SELF_TEST_GROUPS.includes(args[2]))) {
+    process.exit(await selfTest(args[2] ?? null) ? 0 : 1);
+  }
+  console.error('usage: scheduler-selection.mjs --self-test [--group foundation|boundary]');
   process.exit(2);
 }
