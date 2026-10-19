@@ -189,7 +189,7 @@ Explicitly state that `.autoloop/ci-policy.json` is retired and must not be crea
 #### Generated and never committed
 
 - `.git/autoloop/`: live-run markers, typed startup snapshots, dispatch logs/events, reviewer choice, transcript captures, and one-use host nudges.
-- `.git/autoloop/scratch/`: on-disk checkouts the orchestrator reads (base worktrees, `scratch.mjs`); prime prunes the unused ones.
+- `.git/autoloop/scratch/`: on-disk checkouts the orchestrator reads (base worktrees, `scratch.mjs`); prime prunes the unused ones where it can read the process table (Linux; on macOS nothing is pruned).
 - the session scratchpad: small prompt, result, body and contract files. Never a checkout.
 - unit branches and commits: recoverable Git provenance, not setup files.
 

@@ -32,7 +32,8 @@ Notable changes to Autoloop are recorded here. The format follows
   round that the budget then refused). The deferral auto-carry kept no seam.
 - Checkouts and dispatch scratch went to the `/tmp` tmpfs with no clean-up, and the inodes ran out.
   They are now on disk under `<git-common-dir>/autoloop/scratch`, reused while current and pruned
-  when unused (`tools/scratch.mjs`); prime names the root.
+  when unused (`tools/scratch.mjs`); prime names the root. Pruning reads the Linux process table;
+  where it cannot (macOS), nothing is pruned.
 - The parked view kept "(earlier run)" rows for reconcile marks that a refused reconcile never
   closed.
 

@@ -60,7 +60,7 @@ import {
 import { answeredMarker, liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 import { dispatchInheritance } from './inherited-dispatch.mjs';
 import { retireRefusedMarks } from './step.mjs';
-import { pruneScratch, scratchRoot } from './scratch.mjs';
+import { liveUses, pruneScratch, scratchRoot } from './scratch.mjs';
 import { appendEvent, currentRunId, emitEvent, isPaused, readEvents, resolveCommonDir, setPaused, setRunId, takeControls, writeControl } from './events-contract.mjs';
 import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
 
@@ -1390,8 +1390,12 @@ function selfTest() {
         const beforeGrace = new Date(Date.now() - 3 * 3600_000);
         if (planted) utimesSync(join(oldScratch, '.git'), beforeGrace, beforeGrace);
         const opened = primeWith('S-host');
-        const prunedAtOpen = planted && !existsSync(oldScratch)
-          && !spawnSync('git', ['-C', root, 'worktree', 'list'], { encoding: 'utf8' }).stdout.includes('base-old');
+        // Pruned only where the process table can be read (macOS has no
+        // /proc: CI run 39280099232); elsewhere the worktree stays.
+        const listed = spawnSync('git', ['-C', root, 'worktree', 'list'], { encoding: 'utf8' }).stdout.includes('base-old');
+        const prunedAtOpen = planted && (liveUses() === null
+          ? existsSync(oldScratch) && listed
+          : !existsSync(oldScratch) && !listed);
         const bound = latchOf()?.sessionId;
         // Re-audit N1: the hand-off is single-use. A prime the guard did not
         // recognise (env -u …, sh -c …, node --stack-size …, a script) gets

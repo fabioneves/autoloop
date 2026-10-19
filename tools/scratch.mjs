@@ -423,12 +423,13 @@ function hardeningChecks(base, results, holders) {
   writeFileSync(join(proc, 'self', 'status'), 'Name:\tnode\nNSpid:\t7\n');
   results.push(['a nested PID namespace reads as no process table', nested === null && Array.isArray(liveUses(proc))]);
 
-  // A handout prunes what a moved base left behind.
+  // A handout prunes what a moved base left behind; where no process table
+  // can be read (macOS has no /proc: CI run 39280099232), nothing.
   mkdirSync(join(root, 'displaced'));
   age(join(root, 'displaced'));
   const cli = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--base', 'HEAD'], { cwd: repo, encoding: 'utf8' });
-  results.push(['--base prints the worktree and prunes an old entry nothing uses',
-    cli.status === 0 && JSON.parse(cli.stdout).path === named.path && !existsSync(join(root, 'displaced'))]);
+  results.push(['--base prints the worktree and prunes an old entry nothing uses, only where it sees the processes',
+    cli.status === 0 && JSON.parse(cli.stdout).path === named.path && existsSync(join(root, 'displaced')) === (liveUses() === null)]);
 }
 
 function selfTest() {
