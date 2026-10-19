@@ -3,6 +3,44 @@
 Notable changes to Autoloop are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow semantic versioning.
 
+## [0.72.1] - 2026-10-19
+
+### Added
+
+- Auto-decide (`docs/specs/SPEC-auto-decide.md`), on by default: when the loop has a question, it
+  takes its recommendation as a recorded decision that `/answer` reverses, and only a hard-safety
+  matter waits for a human (an irreversible act, a secret, a dependency, a merge authorization, a
+  permission, an invalid lifecycle marker from a trusted author). `"autoDecide": false` in `.autoloop/config.json` restores the v0.72.0 blocks. The
+  key is outside the review fingerprint; the schema stays `0.28.0`, and a config that sets the key
+  needs 0.72.1 or later.
+- `unit.mjs --block` requires `--matter`. With auto-decide on, an `open-findings`,
+  `state-exception`, `protected-build` or `product-value` block is refused (`BLOCK_AUTO_DECIDABLE`)
+  and names `--decide --instead-of <matter>`; a hard matter is never decided
+  (`DECIDE_HARD_MATTER`), a second rework is `REWORK_SPENT`, and `--instead-of` with auto-decide off
+  or an unreadable config is `AUTO_DECIDE_OFF`. The digest lists these decisions under "Auto-decided instead of a block",
+  and prime shows `auto-decide on|off`.
+- A rework after the re-plan hand-off (`docs/specs/SPEC-review-rounds.md` §5a): one fix round and
+  the closing full round in the same ledger. It is granted by a trusted `/answer rework`, or by
+  the loop's one `--instead-of open-findings` decision. A Major still open after it goes to a human
+  as a draft. `unit.mjs --rework-authorization`, `step.mjs --round rework`.
+
+### Fixed
+
+- No transition admitted a human's `/answer rework` after the re-plan hand-off (LFE #519).
+- After the re-plan, the closing round could defer the handed-off Major without a seam and publish
+  clean; a finding outside the delta of the round after the re-plan reached a dead end (a full
+  round that the budget then refused). The deferral auto-carry kept no seam.
+- Checkouts and dispatch scratch went to the `/tmp` tmpfs with no clean-up, and the inodes ran out.
+  They are now on disk under `<git-common-dir>/autoloop/scratch`, reused while current and pruned
+  when unused (`tools/scratch.mjs`); prime names the root.
+- The parked view kept "(earlier run)" rows for reconcile marks that a refused reconcile never
+  closed.
+
+### Upgrade
+
+- Update the plugin and restart loop sessions. A unit blocked on a review hand-off before the
+  update (for example LFE #519) resumes with `/answer rework`.
+
 ## [0.72.0] - 2026-10-13
 
 ### Added
