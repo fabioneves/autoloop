@@ -185,7 +185,7 @@ skipped.
 
    ```bash
    node <plugin-tools>/dispatch.mjs --role implement \
-     --prompt-file /tmp/autoloop-revise.md --issue <N> --json
+     --prompt-file <scratchpad>/<N>-revise.md --issue <N> --json
    ```
 
    Reconcile partial or unknown effects through lifecycle recovery; never blind-retry a writer.

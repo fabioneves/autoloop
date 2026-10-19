@@ -763,6 +763,18 @@
    "branch": "feat/gh-1-x",
    "expect": "block",
    "why": "0.69.0 review of the guard reduction: M6 userinfo and a query normalise"
+  },
+  {
+   "cmd": "node /home/dev/.claude/plugins/cache/autoloop/autoloop/0.72.1/tools/scratch.mjs --base origin/main",
+   "branch": "main",
+   "expect": "allow",
+   "why": "0.72.1: base worktrees left the /tmp tmpfs (LFE 2026-10-15, inodes exhausted); the orchestrator makes them with scratch.mjs"
+  },
+  {
+   "cmd": "node /home/dev/.claude/plugins/cache/autoloop/autoloop/0.72.1/tools/lifecycle-driver.mjs --reconcile-json < /tmp/claude-1000/-home-dev-lfe/3f1c/scratchpad/412-lifecycle-request.json",
+   "branch": "main",
+   "expect": "allow",
+   "why": "0.72.1: the lifecycle request is per session and per issue, no longer one shared /tmp/autoloop-lifecycle-request.json"
   }
  ]
 }

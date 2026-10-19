@@ -40,7 +40,7 @@ remedy; never devendor inside a Dev run.
 node <plugin-tools>/prime.mjs --json
 ```
 
-`{ok,version,repository,checkout,config,base,runMarker,waits,blocks,controls,paused,timings,snapshotPath,snapshotBytes,eligible,markers,sections,dispatches}`:
+`{ok,version,repository,checkout,config,base,scratch,runMarker,waits,blocks,controls,paused,timings,snapshotPath,snapshotBytes,eligible,markers,retiredMarks,sections,dispatches}`:
 
 - `markers` — lifecycle markers by issue: `gating` (issue open), `deferred` (issue closed),
   `knownRefused` (deferred markers the same driver already refused since they last changed).
@@ -278,7 +278,8 @@ The run record's `overlap:` line comes from `overlap-report.mjs`.
   **A step is announced ONCE, by its ribbon**: the line `step.mjs` prints on its tool row. Never
   repeat it in prose; extra detail is a `--note` suffix.
 - **The scratchpad is a write target, never a cwd**: never `cd <scratchpad> && …` (`git`, `gh`,
-  the driver, the gate need the repo cwd).
+  the driver, the gate need the repo cwd). It holds small files only. **Never make a checkout
+  under `/tmp`**: a checkout is `node <plugin-tools>/scratch.mjs --base <ref>`, on disk.
 - **After compaction, re-fetch byte-exact values** (SHA, planHash, comment id, label) from GitHub
   or disk; never recall them. Prefer a hand-off at a unit boundary over compacting mid-unit.
 
@@ -386,9 +387,8 @@ A staged unit uses `--staged` and gets no labels until its claim.
 body, boundary}`). The prompt carries the FULL issue (never an excerpt), lane constraints, and paths to STATE, the
 checklist, and the spec. The orchestrator keeps premise, selection, `planHash`, intent, and claim.
 **Never ask a read-only role to run a command; hand it the base as FILES**:
-`git worktree add --detach <scratchpad>/base-<sha8> origin/<base>` (`<sha8>`: the commit
-`origin/<base>` names; a path already there is that commit, reuse it), named in the prompt,
-removed at collection (`git worktree remove <scratchpad>/base-<sha8>`).
+`node <plugin-tools>/scratch.mjs --base origin/<base>` prints `{path,oid}`: a worktree of that
+commit, reused while it is current; name `path` in the prompt. It and prime prune unused ones.
 
 The plan contains: verified premises and evidence; module/API seam and file boundary; behavior and
 non-behavior; **rules as complete invariants**; acceptance checks and failure modes; applicable
@@ -439,7 +439,7 @@ Write the closed request
 to a file:
 
 ```bash
-node <plugin-tools>/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
+node <plugin-tools>/lifecycle-driver.mjs --reconcile-json < <scratchpad>/<N>-lifecycle-request.json
 ```
 
 Compose it from `lifecycle-driver.mjs --example-request` with `jq -n --rawfile` (no `boundary`);
@@ -684,7 +684,7 @@ Write the closed terminal request to a bounded file:
 `receiptFingerprint` is the clean `reviewTransition()`'s `reviewEvidenceFingerprint`. Then:
 
 ```bash
-node <plugin-tools>/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
+node <plugin-tools>/lifecycle-driver.mjs --reconcile-json < <scratchpad>/<N>-lifecycle-request.json
 node <plugin-tools>/publish-verdict.mjs terminal-finalize \
   --request-file <terminal-request.json> \
   --review-evidence-file <exact-clean-review-input.json>

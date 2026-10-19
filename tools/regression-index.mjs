@@ -2187,6 +2187,21 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'prime.mjs', anchor: "'prime retires the open reconcile mark of a refused closed issue, whichever driver refused it'" }),
     ]),
   }),
+  Object.freeze({
+    id: 'checkouts-filled-the-tmp-inodes',
+    date: '2026-10-15',
+    symptom: 'The LFE run stopped: the /tmp tmpfs had no free inodes. Checkouts the orchestrator made '
+      + 'under /tmp (/tmp/lfe-518-work, /tmp/lfe-519-res) and base worktrees in the session '
+      + 'scratchpad were never removed.',
+    cause: 'Nothing defined where a checkout goes or when it is removed: the skill put base worktrees '
+      + 'in the scratchpad on /tmp and left their removal to the model, and other checkouts got '
+      + 'invented /tmp paths.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'scratch.mjs', anchor: "'prune keeps a worktree younger than the grace time and one a live prompt names'" }),
+      Object.freeze({ file: 'prime.mjs', anchor: "'prime prunes an unused old scratch worktree when the run opens'" }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**Never make a checkout\n  under `/tmp`**' }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>

@@ -37,6 +37,7 @@ import {
   unlinkSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -49,6 +50,7 @@ import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs'
 import { pinnedModelsPath, pluginRunMarkers } from './run-markers.mjs';
 import { noteDispatch, resumedLine, transition } from './step.mjs';
 import { readStepBinding } from './dispatch-return-association.mjs';
+import { scratchRoot } from './scratch.mjs';
 import { appendEvent, emitEvent, readEvents, resolveCommonDir, takeControls, writeControl } from './events-contract.mjs';
 
 const MAX_PROMPT_BYTES = 4 * 1024 * 1024;
@@ -410,6 +412,19 @@ export function hookWiringRoots(cwd) {
     }
   };
   return [...new Set([real(worktree), real(main)])];
+}
+
+// The roots a dispatch reads but does not own: its brief's directory, the
+// plugin skills, and the repository's scratch root, where the base worktrees
+// a read-only role reads are (scratch.mjs). Outside a repository, no scratch.
+export function dispatchReadRoots(promptFile, cwd, env = process.env) {
+  let scratch = [];
+  try {
+    scratch = [scratchRoot(cwd)];
+  } catch {
+    // Not a repository: nothing to grant.
+  }
+  return [dirname(resolve(promptFile)), pluginsDir(env), ...scratch];
 }
 
 function processSettings(tools, readRoots = [], wiringRoots = []) {
@@ -1789,7 +1804,8 @@ function selfTest() {
         spawnSync('git', ['-C', repo, 'worktree', 'add', '-q', '-b', 'unit', worktree]);
         const roots = hookWiringRoots(worktree);
         const argv = dispatchArgv('implement', resolveTools('implement'), [], roots).join(' ');
-        return { repo: realpathSync(repo), worktree: realpathSync(worktree), roots, argv };
+        const readRoots = dispatchReadRoots('/tmp/unit-9/prompt.md', worktree, { CLAUDE_CONFIG_DIR: '/cfg' });
+        return { repo: realpathSync(repo), worktree: realpathSync(worktree), roots, argv, readRoots };
       } catch (error) {
         return { error: error.message };
       } finally {
@@ -1803,6 +1819,20 @@ function selfTest() {
           && wiringRoots.argv.includes(`Edit(/${wiringRoots.worktree}/${path})`))
         && !wiringRoots.argv.includes('tools/agentic')
         && dispatchArgv('implement', resolveTools('implement'), [], ['/a(b)']).join(' ').includes('/a(b)') === false);
+    // LFE, 2026-10-15: base worktrees moved from the /tmp tmpfs to the
+    // repository's scratch root (scratch.mjs). A reviewer in a linked worktree
+    // reads them there, outside its own checkout.
+    check('a dispatch grants read-only access to its brief, the plugin skills and the repository scratch root',
+      JSON.stringify(wiringRoots.readRoots)
+        === JSON.stringify(['/tmp/unit-9', '/cfg/plugins', `${wiringRoots.repo}/.git/autoloop/scratch`])
+        && (() => {
+          try {
+            return JSON.stringify(dispatchReadRoots('/tmp/unit-9/prompt.md', tmpdir(), { CLAUDE_CONFIG_DIR: '/cfg' }))
+              === JSON.stringify(['/tmp/unit-9', '/cfg/plugins']);
+          } catch {
+            return false;
+          }
+        })());
     check('the plugin skills root defaults to ~/.claude/plugins and follows CLAUDE_CONFIG_DIR',
       pluginsDir({}) === join(homedir(), '.claude', 'plugins')
       && pluginsDir({ CLAUDE_CONFIG_DIR: '/cfg' }) === '/cfg/plugins');
@@ -1986,6 +2016,10 @@ function selfTest() {
         writeFileSync(promptPath, 'review');
         const chosen = join(cliDir, 'cli-live.jsonl');
         const configDir = join(cliDir, 'config');
+        // git alone beside node: the scratch grant asks git for the common dir.
+        const gitOnly = join(cliDir, 'git-bin');
+        mkdirSync(gitOnly);
+        symlinkSync(spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim(), join(gitOnly, 'git'));
         const run = spawnSync(process.execPath, [
           fileURLToPath(import.meta.url),
           '--role', 'plan-review',
@@ -1997,7 +2031,7 @@ function selfTest() {
         ], {
           cwd: repoScratch,
           encoding: 'utf8',
-          env: { ...process.env, PATH: dirname(process.execPath), CLAUDE_CONFIG_DIR: configDir },
+          env: { ...process.env, PATH: `${dirname(process.execPath)}:${gitOnly}`, CLAUDE_CONFIG_DIR: configDir },
         });
         const argvSeen = readFileSync(argvPath, 'utf8');
         let cliResult;
@@ -2015,6 +2049,7 @@ function selfTest() {
           && argvSeen.includes('--model gpt-test-model')
           && argvSeen.includes(`Read(/${cliDir}/**)`)
           && argvSeen.includes(`Read(/${join(configDir, 'plugins')}/**)`)
+          && argvSeen.includes(`Read(/${join(realpathSync(repoScratch), '.git', 'autoloop', 'scratch')}/**)`)
           && existsSync(chosen)
           && cliResult.engine === 'claude'
           && cliResult.model === 'gpt-test-model';
@@ -3330,7 +3365,7 @@ function main() {
     ...(parsed.liveFile === null ? {} : { liveFile: parsed.liveFile }),
     ...(parsed.fallback ? { fallback: true } : {}),
     ...(parsed.issue === null ? {} : { issue: parsed.issue }),
-    readRoots: [dirname(resolve(parsed.promptFile)), pluginsDir()],
+    readRoots: dispatchReadRoots(parsed.promptFile, process.cwd()),
     promptFile: resolve(parsed.promptFile),
   });
   const serialized = `${JSON.stringify(result, null, 1)}\n`;

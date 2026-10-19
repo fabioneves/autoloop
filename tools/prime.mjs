@@ -32,6 +32,7 @@ import {
   realpathSync,
   rmSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -59,6 +60,7 @@ import {
 import { answeredMarker, liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 import { dispatchInheritance } from './inherited-dispatch.mjs';
 import { retireRefusedMarks } from './step.mjs';
+import { pruneScratch, scratchRoot } from './scratch.mjs';
 import { appendEvent, currentRunId, emitEvent, isPaused, readEvents, resolveCommonDir, setPaused, setRunId, takeControls, writeControl } from './events-contract.mjs';
 import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
 
@@ -242,6 +244,8 @@ export function primeDev({
     return failure('run', 'RUN_LATCH_UNCONFIRMED', 'this Claude process holds a run latch open for another conversation '
       + '(/clear started this one), so the run is not opened. Close it with `prime.mjs --close-run`, then prime again.');
   }
+  // Only a run that opens prunes.
+  const scratch = openScratch(root);
   // A live own marker before this prime means the same run goes on; none
   // means a new run, whose predecessor ended without --close-run (an exit,
   // a kill, a restart): its id is abandoned so the new run's events are its own.
@@ -305,6 +309,7 @@ export function primeDev({
     config: configSummary(config, root),
     ...models,
     base,
+    scratch,
     runMarker,
     waits,
     blocks,
@@ -313,6 +318,16 @@ export function primeDev({
     timings: { scanMs, primeMs: Date.now() - PROCESS_START_MS },
     snapshot,
   };
+}
+
+// The run's on-disk scratch root (scratch.mjs), pruned of the worktrees
+// nothing uses. A failure is reported, never fatal: the run needs no scratch.
+function openScratch(root) {
+  try {
+    return { root: scratchRoot(root), ...pruneScratch(root) };
+  } catch (error) {
+    return { root: null, removed: [], error: error.message };
+  }
 }
 
 // The controls prime consumes: pause and unpause keep the paused marker;
@@ -787,6 +802,7 @@ function report(summary) {
     + `  behind ${summary.base.behindRemoteBase ?? '?'}`,
     `config ${summary.config.version}  merge ${summary.config.mergePolicy}`
     + `  gate ${summary.config.gateCommand}`,
+    `scratch ${summary.scratch.root ?? `unavailable: ${summary.scratch.error}`}`,
     `scan   ${summary.timings.scanMs}ms  prime ${summary.timings.primeMs}ms`
     + `  snapshot ${summary.snapshotBytes}B -> ${summary.snapshotPath}`,
     ...haltLines(summary.halted),
@@ -1352,7 +1368,17 @@ function selfTest() {
         const exited = spawnSync(process.execPath, ['-e', '0'], { timeout: 10000 }).pid;
         const noStart = primeDev({ ...quiet, owner: exited });
         recordHostSession({ sessionId: 'S-host', directory: latches });
+        // LFE, 2026-10-15: checkouts on the /tmp tmpfs filled its inodes. A
+        // scratch worktree under the repository nothing uses and older than
+        // the grace time is pruned when the run opens.
+        const oldScratch = join(root, '.git', 'autoloop', 'scratch', 'base-old');
+        spawnSync('git', ['-C', root, 'worktree', 'add', '-q', '--detach', oldScratch, 'HEAD']);
+        const planted = existsSync(join(oldScratch, '.git'));
+        const beforeGrace = new Date(Date.now() - 3 * 3600_000);
+        if (planted) utimesSync(join(oldScratch, '.git'), beforeGrace, beforeGrace);
         const opened = primeWith('S-host');
+        const prunedAtOpen = planted && !existsSync(oldScratch)
+          && !spawnSync('git', ['-C', root, 'worktree', 'list'], { encoding: 'utf8' }).stdout.includes('base-old');
         const bound = latchOf()?.sessionId;
         // Re-audit N1: the hand-off is single-use. A prime the guard did not
         // recognise (env -u …, sh -c …, node --stack-size …, a script) gets
@@ -1375,6 +1401,7 @@ function selfTest() {
           && rebinding.ok === false && rebinding.error.code === 'RUN_LATCH_UNCONFIRMED' && !existsSync(markerDirectory)
           && latchOf()?.sessionId === 'S-host' && guard.status === 2,
         );
+        check('prime prunes an unused old scratch worktree when the run opens', prunedAtOpen);
         // After --close-run and /clear (session S2): an unrecognised prime
         // finds no hand-off, nor a stale one, and reopens nothing; a prime the
         // guard saw in S2 opens S2's run.
