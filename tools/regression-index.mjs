@@ -2174,6 +2174,19 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: 'step.mjs', anchor: "'a transition with --pr keeps the PR on the record, and every later ribbon names it beside the issue'" }),
     ]),
   }),
+  Object.freeze({
+    id: 'refused-closed-issues-stayed-in-every-parked-view',
+    date: '2026-10-16',
+    symptom: 'Eight closed issues (#270, 272, 274, 280, 284, 285, 291, 314) stayed in every parked view '
+      + 'and run card as "00 reconcile … (earlier run)", days after their last reconcile.',
+    cause: 'The skill opens a 00-reconcile step before each driver call. Only a merged close-out closed '
+      + 'it; a refused reconcile wrote a refusal record that prime used to skip the marker, but nothing '
+      + 'closed the step the refused attempt had opened.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'step.mjs', anchor: "'a refused closed issue retires its open reconcile mark, and leaves the parked view and the card'" }),
+      Object.freeze({ file: 'prime.mjs', anchor: "'prime retires the open reconcile mark of a refused closed issue, whichever driver refused it'" }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>

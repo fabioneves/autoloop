@@ -306,6 +306,32 @@ export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue
   }
 }
 
+// Prime's deferred schedule lists the markers of closed issues. When the
+// driver refused such a reconcile, the open reconcile mark of that attempt is
+// closed as refused, with no card. A mark newer than its refusal, other work
+// and a pending delivery stay open. A changed driver still retries the
+// marker, which opens a new mark.
+export function retireRefusedMarks({ dir, issues, refusals, nowMs = Date.now() }) {
+  const retired = [];
+  for (const issue of issues ?? []) {
+    const refusal = refusals?.[issue];
+    if (!Number.isFinite(refusal?.atMs)) continue;
+    try {
+      const outcome = updateStepRecord(join(dir, 'steps', `${issue}.json`), (record) => {
+        const last = record?.steps?.at(-1);
+        if (record?.issue !== issue || record.closed || record.pending || last?.step !== '00-reconcile'
+          || !(refusal.atMs >= last.startedAtMs)) return { changed: false };
+        record.closed = { outcome: 'refused', atMs: nowMs, code: refusal.code };
+        return { changed: true, record };
+      });
+      if (outcome.changed) retired.push(issue);
+    } catch {
+      // A record that cannot be updated stays visible; the next prime retries.
+    }
+  }
+  return retired;
+}
+
 export function transition({
   root, run = realRun(root), nowMs = Date.now(),
   issue, to, round = null, model = null, fallback = false, badge = '⏳', note = '', staged = false, pr = null,
@@ -1218,6 +1244,7 @@ function selfTest() {
   checks.push(...transitionChecks(at));
   checks.push(...dispositionChecks());
   checks.push(...pendingMergeChecks());
+  checks.push(...refusedMarkChecks());
   checks.push(...projectionChecks(at));
   const minute = 60_000;
   const start = at(9, 9);
@@ -2116,6 +2143,54 @@ function dispositionChecks() {
         && !unobserved.parked.includes('#640') && !unobserved.parked.startsWith('THREW')]);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+  return results;
+}
+
+// LFE, 2026-10-16: eight closed issues (#270…#314) stayed in every parked
+// view as "00 reconcile … (earlier run)". Prime skipped their markers as known
+// refused, but nothing closed the reconcile step the refused attempt opened.
+function refusedMarkChecks() {
+  const day = (hh, mm) => new Date(2026, 9, 12, hh, mm).getTime();
+  const nowMs = day(10, 30);
+  const base = mkdtempSync(join(tmpdir(), 'step-refused-'));
+  const dir = join(base, '.git', 'autoloop');
+  const stepsDir = join(dir, 'steps');
+  const run = (command, args) => (command === 'git' && args.includes('--git-common-dir')
+    ? { ok: true, stdout: join(base, '.git'), stderr: '' } : { ok: false, stdout: '', stderr: `unexpected ${command}` });
+  const markers = () => [{ marker: { version: 1, pids: [1], openedAtMs: day(9, 0) } }];
+  const reconcile = (atMs) => ({ step: '00-reconcile', startedAtMs: atMs });
+  const records = [
+    { issue: 270, steps: [reconcile(day(8, 0))] },
+    { issue: 271, steps: [reconcile(day(8, 50))] },
+    { issue: 272, steps: [{ step: '05-implement', startedAtMs: day(8, 0) }] },
+    { issue: 273, steps: [reconcile(day(8, 0))], pending: { outcome: 'delivered', pr: 9, policy: 'auto', reason: null, atMs: day(8, 0) } },
+    { issue: 274, steps: [reconcile(day(8, 0))] },
+  ];
+  const refusal = (atMs) => ({ code: 'PREMERGE_CI_COMPONENT_MISMATCH', atMs, driver: 'd' });
+  const refusals = { 270: refusal(day(8, 1)), 271: refusal(day(8, 1)), 272: refusal(day(8, 1)), 273: refusal(day(8, 1)) };
+  const issues = [270, 271, 272, 273, 274];
+  const results = [];
+  try {
+    mkdirSync(stepsDir, { recursive: true });
+    for (const record of records) writeFileSync(join(stepsDir, `${record.issue}.json`), JSON.stringify(record));
+    const retired = retireRefusedMarks({ dir, issues, refusals, nowMs });
+    const stored = (issue) => readJson(join(stepsDir, `${issue}.json`), null);
+    const parked = parkedView({ root: base, run, nowMs, markers });
+    const card = runCard({ root: base, run, nowMs, live: () => true, markers });
+    results.push(['a refused closed issue retires its open reconcile mark, and leaves the parked view and the card',
+      JSON.stringify(retired) === '[270]'
+        && JSON.stringify(stored(270)?.closed) === JSON.stringify({ outcome: 'refused', atMs: nowMs, code: 'PREMERGE_CI_COMPONENT_MISMATCH' })
+        && !parked.includes('#270 ') && !card.includes('#270 ')]);
+    results.push(['a mark newer than its refusal, other work, a pending delivery and an unrefused mark stay open and shown',
+      [271, 272, 273, 274].every((issue) => stored(issue)?.closed === undefined
+        && parked.includes(`#${issue} `) && card.includes(`#${issue} `))]);
+    results.push(['retiring again changes nothing', JSON.stringify(retireRefusedMarks({ dir, issues, refusals, nowMs: nowMs + 1 })) === '[]'
+      && stored(270)?.closed?.atMs === nowMs]);
+  } catch (error) {
+    results.push([`the refused-mark checks ran: ${error.message}`, false]);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
   }
   return results;
 }

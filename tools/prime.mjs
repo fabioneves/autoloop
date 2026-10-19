@@ -50,6 +50,7 @@ import {
   completeSection,
   createSnapshot,
   eligibleIssueNumbers,
+  incompleteSection,
   issueSnapshotItem,
   haltIssueNumbers,
   markerSchedule,
@@ -57,6 +58,7 @@ import {
 } from './snapshot-contract.mjs';
 import { answeredMarker, liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 import { dispatchInheritance } from './inherited-dispatch.mjs';
+import { retireRefusedMarks } from './step.mjs';
 import { appendEvent, currentRunId, emitEvent, isPaused, readEvents, resolveCommonDir, setPaused, setRunId, takeControls, writeControl } from './events-contract.mjs';
 import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
 
@@ -632,6 +634,10 @@ export function persistPrimeSnapshot(result, cwd = process.cwd()) {
   const bytes = `${JSON.stringify(result.snapshot, null, 1)}\n`;
   writeFileSync(snapshotPath, bytes);
   const { snapshot, ...compact } = result;
+  const schedule = markerSchedule(snapshot);
+  const refusals = readMarkerRefusals(dirname(directory));
+  // Named in the summary, so the run record says which marks left the views.
+  const retiredMarks = retireRefusedMarks({ dir: dirname(directory), issues: schedule?.deferred, refusals });
   return {
     ...compact,
     snapshotPath,
@@ -640,11 +646,12 @@ export function persistPrimeSnapshot(result, cwd = process.cwd()) {
     eligible: result.paused === true ? [] : eligibleIssueNumbers(snapshot),
     halted: haltIssueNumbers(snapshot),
     markers: splitKnownRefused(
-      markerSchedule(snapshot),
+      schedule,
       snapshot.sections.lifecycleMarkers?.items ?? [],
-      readMarkerRefusals(dirname(directory)),
+      refusals,
       lifecycleDriverIdentity(),
     ),
+    retiredMarks,
     sections: sectionSummary(snapshot),
     // A dispatch whose session ended is this run's to collect, not to stop
     // (inherited-dispatch.mjs); one a live session owns is left alone.
@@ -1183,6 +1190,60 @@ function selfTest() {
         // The fixture repository has no origin, so the executor refuses before any GitHub call.
         return outcome.applied.length === 0 && outcome.refused.length === 1
           && outcome.refused[0].control === 'merge PR #4242' && outcome.refused[0].reason.startsWith('merge gate: ');
+      })(),
+    );
+    // LFE, 2026-10-16: a refused closed issue kept its reconcile mark in every
+    // parked view. Prime retires it where it reads the refusal, also when a
+    // plugin update changed the driver and the marker is retried. An open
+    // issue's mark, or any mark without a complete open-issue list, stays.
+    check(
+      'prime retires the open reconcile mark of a refused closed issue, whichever driver refused it',
+      (() => {
+        const autoloop = join(root, '.git', 'autoloop');
+        const refusedAtMs = Date.parse('2026-01-01T12:00:00Z');
+        const marker = (issue) => ({ issueNumber: issue, id: `IC_${issue}`, tipId: `IC_${issue}`, sequence: 0,
+          author: 'autoloop', authorAssociation: 'MEMBER', createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z', url: `https://example.test/issues/${issue}#issuecomment-1`,
+          body: `<!-- autoloop-lifecycle-v1\n{"branch":"feat/gh-${issue}-contract","intentSource":"invocation","issue":${issue},`
+            + `"issueBodyHash":"${'b'.repeat(64)}","mergePolicy":"manual","phase":"intent-recorded","planHash":"${'c'.repeat(64)}",`
+            + `"plannedBaseOid":"${'a'.repeat(40)}","runIntentHash":"${'d'.repeat(64)}","selector":"native","v":1}\n-->` });
+        const open = issueSnapshotItem({ number: 271, title: 'open', body: 'b', updatedAt: '2026-01-01T00:00:00Z',
+          lastEditedAt: null, labels: ['loop-waiting'] });
+        const snapshotWith = (openIssues) => {
+          const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
+          sections.repo = completeSection([{ owner: 'o', name: 'r', nameWithOwner: 'o/r', defaultBranch: 'main' }]);
+          sections.tree = completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: 'main', headOid: 'a'.repeat(40) }]);
+          sections.lifecycleMarkers = completeSection([marker(270), marker(271)]);
+          sections.openIssues = openIssues;
+          return createSnapshot({ scannedAt: '2026-01-02T00:00:00.000Z', sections });
+        };
+        const seed = () => {
+          mkdirSync(join(autoloop, 'marker-refusals'), { recursive: true });
+          mkdirSync(join(autoloop, 'steps'), { recursive: true });
+          for (const issue of [270, 271]) {
+            writeFileSync(join(autoloop, 'marker-refusals', `${issue}.json`),
+              JSON.stringify({ code: 'PREMERGE_CI_COMPONENT_MISMATCH', atMs: refusedAtMs, driver: 'an-older-driver' }));
+            writeFileSync(join(autoloop, 'steps', `${issue}.json`),
+              JSON.stringify({ issue, steps: [{ step: '00-reconcile', startedAtMs: refusedAtMs - 30_000 }] }));
+          }
+        };
+        const closed = (issue) => JSON.parse(readFileSync(join(autoloop, 'steps', `${issue}.json`), 'utf8')).closed;
+        const persist = (openIssues) => persistPrimeSnapshot(
+          { ok: true, paused: false, checkout: { headOid: 'e'.repeat(40) }, snapshot: snapshotWith(openIssues) }, root);
+        try {
+          seed();
+          const unknown = persist(incompleteSection('SCAN_FAILED', 'open issues failed', [open]));
+          const unknownKept = [270, 271].every((issue) => closed(issue) === undefined);
+          const persisted = persist(completeSection([open]));
+          return unknownKept && unknown.markers === null && JSON.stringify(unknown.retiredMarks) === '[]'
+            && JSON.stringify(persisted.markers?.deferred) === '[270]' && persisted.markers.knownRefused.length === 0
+            && JSON.stringify(persisted.retiredMarks) === '[270]'
+            && closed(270)?.outcome === 'refused' && closed(270).code === 'PREMERGE_CI_COMPONENT_MISMATCH'
+            && closed(271) === undefined;
+        } finally {
+          rmSync(join(autoloop, 'marker-refusals'), { recursive: true, force: true });
+          for (const issue of [270, 271]) rmSync(join(autoloop, 'steps', `${issue}.json`), { force: true });
+        }
       })(),
     );
     const base = baseSyncFacts(root, 'main');
