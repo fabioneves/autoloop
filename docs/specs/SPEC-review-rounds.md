@@ -57,8 +57,9 @@ Majors in late rounds were raised on lines that earlier fixes added.
    rework…` posted after the loop's block on that hand-off and not superseded by a newer
    answer; and `decision`, the loop's own `rework…` decision on it, whose newest trusted
    `/answer`, if any, is `rework…` too. The loop's newest marker on the hand-off decides alone: an
-   older marker never stands behind its no. A unit gets one `decision` rework. Any number of `answer` reworks is possible,
-   each bound to a later hand-off. A rework that names other evidence, a round that is not a
+   older marker never stands behind its no. A unit gets one `decision` rework, the one that
+   [Auto-decide](SPEC-auto-decide.md) takes (`--instead-of open-findings`). Any number of `answer`
+   reworks is possible, each bound to a later hand-off. A rework that names other evidence, a round that is not a
    hand-off, or a round past its closing round is `REVIEW_REWORK_SPENT`; a rework on evidence
    that is not a hand-off is refused when appended (`REWORK_NOT_AUTHORIZABLE`). A finding still
    open after the rework is handed off again by rule 4 or 5. The publisher posts no

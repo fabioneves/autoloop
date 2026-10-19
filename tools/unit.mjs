@@ -30,7 +30,13 @@
 //               loop-ready stays. A human answers with `/answer <decision>` on
 //               the issue. TRUST_REQUIRED and UNSPECIFIED_VALUE are retired: a
 //               specification gap is decided (33 premise blocks on one project
-//               waited for a human on gaps the loop could decide).
+//               waited for a human on gaps the loop could decide). `--matter`
+//               names what the block is about. While autoDecide is on (the
+//               default), an open-findings, state-exception, protected-build or
+//               product-value matter is refused as BLOCK_AUTO_DECIDABLE: it is
+//               decided with `--decide --instead-of <matter>`. The one exception
+//               is open-findings after the loop's one rework decision. With
+//               autoDecide off, `--instead-of` is refused (AUTO_DECIDE_OFF).
 //
 //   --repair    Work a unit needs that is outside its own lane: an issue the loop
 //               files itself, labelled `loop-repair` (never `loop-ready`) with a
@@ -43,6 +49,9 @@
 //               recommended option, its alternatives and the evidence. A machine
 //               comment records it and the issue is labelled `loop-decided`; a
 //               human reverses it by replying `/answer <what instead>`.
+//               `--instead-of <matter>` records the block it replaces; a hard
+//               matter is refused (DECIDE_HARD_MATTER), and so is a second
+//               open-findings rework (REWORK_SPENT).
 //
 //   --decisions Every decision of one unit with its comment link, and the
 //               `## Decisions` section the PR body and the run record carry.
@@ -71,9 +80,9 @@
 //   node <plugin-tools>/unit.mjs --obsolete --issue <N> (--pr <M> | --commit <sha>) [--note <text>]
 //   node <plugin-tools>/unit.mjs --wait --issue <N> (--on-issue <M> | --on-base-red | --minutes <1..720> | --on-pr <M> --paths <a,b/>) [--note <text>]
 //   node <plugin-tools>/unit.mjs --overlap --issue <N> --boundary-file <path> --snapshot <path>
-//   node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE> --question <one line> [--gate human:authorize] [--note <text>] [--review-fingerprint <sha256> --review-round <N>]
+//   node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE> --matter <matter> --question <one line> [--gate human:authorize] [--note <text>] [--review-fingerprint <sha256> --review-round <N>]
 //   node <plugin-tools>/unit.mjs --repair --parent <N> --title <text> --body-file <path> [--blocks-parent]
-//   node <plugin-tools>/unit.mjs --decide --issue <N> --question <one line> --choice <text> --why <text> [--alternatives "<a>; <b>"] [--review-fingerprint <sha256> --review-round <N>]
+//   node <plugin-tools>/unit.mjs --decide --issue <N> --question <one line> --choice <text> --why <text> [--alternatives "<a>; <b>"] [--instead-of <matter>] [--review-fingerprint <sha256> --review-round <N>]
 //   node <plugin-tools>/unit.mjs --decisions --issue <N> [--out <path>]
 //   node <plugin-tools>/unit.mjs --rework-authorization --issue <N> --review-fingerprint <sha256> --out <path>
 //   node <plugin-tools>/unit.mjs --lift
@@ -81,11 +90,11 @@
 //   node <plugin-tools>/unit.mjs --self-test
 
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { NO_CONFIG, resolveProjectConfig } from './config-contract.mjs';
+import { CONFIG_VERSION, NO_CONFIG, autoDecideEnabled, resolveProjectConfig } from './config-contract.mjs';
 import { updateStepRecord } from './dispatch-return-association.mjs';
 import { inLane } from './lane-contract.mjs';
 import { emitEvent, eventText, readEvents } from './events-contract.mjs';
@@ -101,6 +110,24 @@ const BLOCK_MARKER_RE = /<!-- autoloop-block-v1 (\{[^\n]*?\}) -->/gu;
 const REASON_RE = /^[A-Z][A-Z0-9_]*$/u;
 const BLOCK_GATES = Object.freeze(['human:decide', 'human:authorize']);
 const HUMAN_BLOCK_REASONS = new Set(['IRREVERSIBLE_ACTION', 'POLICY_DENIED']);
+// SPEC-auto-decide: what a block is about. A hard matter is always a human's;
+// an auto-decidable one takes its recommendation while autoDecide is on. A
+// trust-marker decision would leave the unit selectable with its marker still
+// refused, so only a block takes it out of the queue.
+const HARD_MATTERS = new Set(['irreversible', 'secret', 'dependency', 'merge-authorization', 'permission', 'trust-marker']);
+const AUTO_MATTERS = new Map([
+  ['open-findings', 'rework once: --review-fingerprint/--review-round of the hand-off, then --rework-authorization'],
+  ['state-exception', 'comply with STATE and continue'],
+  ['protected-build', 'build inside the admitted plan; the PR carries human:authorize'],
+  ['product-value', 'the narrowest value, with the alternatives'],
+]);
+
+// The loop decides one rework per unit (SPEC-review-rounds §5a): its own
+// decision taken instead of the open-findings block.
+function reworkSpent(comments) {
+  return (comments ?? []).some((comment) => comment?.viewerDidAuthor === true
+    && parseDecision(comment.body)?.insteadOf === 'open-findings');
+}
 // Reasons that carried specification gaps to a human; a gap is decided now.
 const RETIRED_BLOCK_REASONS = new Set(['TRUST_REQUIRED', 'UNSPECIFIED_VALUE']);
 const RESUMED_MARKER_RE = /<!-- autoloop-resumed-v1 (\{[^\n]*?\}) -->/gu;
@@ -464,13 +491,35 @@ function reviewBinding(reviewFingerprint, reviewRound) {
   return { reviewFingerprint, reviewRound };
 }
 
-export function markDecided({ issue, question, choice, alternatives = [], why, reviewFingerprint = null, reviewRound = null, run, now = Date.now() }) {
+export function markDecided({ issue, question, choice, alternatives = [], why, insteadOf = null, autoDecide = false, reviewFingerprint = null, reviewRound = null, run, now = Date.now() }) {
   if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
   if (!text(question) || question.includes('\n')) return refusal('INVALID_ARGS', '--question: expected one non-empty line');
   if (!text(choice) || !text(why)) return refusal('INVALID_ARGS', 'expected a non-empty --choice and --why');
+  if (HARD_MATTERS.has(insteadOf)) {
+    return refusal('DECIDE_HARD_MATTER', `a ${insteadOf} matter is a human's: unit.mjs --block --matter ${insteadOf}`);
+  }
+  if (insteadOf !== null && !AUTO_MATTERS.has(insteadOf)) {
+    return refusal('INVALID_ARGS', `--instead-of: expected one of ${[...AUTO_MATTERS.keys()].join(', ')}`);
+  }
+  if (insteadOf !== null && !autoDecide) {
+    return refusal('AUTO_DECIDE_OFF', `autoDecide is off or the project config is unreadable: unit.mjs --block --matter ${insteadOf}`);
+  }
   const binding = reviewBinding(reviewFingerprint, reviewRound);
   if (binding === null) return refusal('INVALID_ARGS', '--review-fingerprint <sha256> and --review-round <N> go together');
-  if (issueState(run, issue) !== 'OPEN') return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
+  // The decision the open-findings exception counts is the one rework, so it
+  // must be one `--rework-authorization` can grant.
+  if (insteadOf === 'open-findings' && (binding.reviewFingerprint === undefined || !REWORK_RE.test(text(choice)))) {
+    return refusal('INVALID_ARGS', '--instead-of open-findings is the one rework: --choice "rework once" with the hand-off\'s --review-fingerprint and --review-round');
+  }
+  if (insteadOf === 'open-findings') {
+    const facts = issueFacts(run, issue, 'state,comments');
+    if (facts?.state !== 'OPEN') return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
+    if (reworkSpent(facts.comments)) {
+      return refusal('REWORK_SPENT', `the loop already took its one rework on #${issue}: unit.mjs --block --reason POLICY_DENIED --matter open-findings`);
+    }
+  } else if (issueState(run, issue) !== 'OPEN') {
+    return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
+  }
   const decision = {
     issue,
     question: text(question),
@@ -478,11 +527,13 @@ export function markDecided({ issue, question, choice, alternatives = [], why, r
     alternatives: alternatives.map((entry) => entry.trim()).filter(Boolean),
     why: text(why),
     at: new Date(now).toISOString(),
+    ...(insteadOf === null ? {} : { insteadOf }),
     ...binding,
   };
   const body = [
     decisionMarker(decision),
     `**autoloop: decided** — ${decision.choice}`,
+    ...(insteadOf === null ? [] : [`Taken instead of a block (${insteadOf}): autoDecide is on.`]),
     '',
     `Question: ${decision.question}`,
     `Why: ${decision.why}`,
@@ -528,7 +579,8 @@ export function unitDecisions(comments) {
     const decision = parseDecision(comment.body);
     if (decision !== null) {
       decisions.push({ kind: 'decision', question: decision.question ?? null, choice: decision.choice, alternatives: decision.alternatives,
-        why: decision.why, at: decision.at, url: comment.url ?? null, answer: answerAfterIndex(index) });
+        why: decision.why, at: decision.at, url: comment.url ?? null, answer: answerAfterIndex(index),
+        ...(typeof decision.insteadOf === 'string' ? { insteadOf: decision.insteadOf } : {}) });
       return;
     }
     const resumed = newestMarker(RESUMED_MARKER_RE, comment.body, (parsed) => positive(parsed?.issue) && text(parsed.by) && typeof parsed.answer === 'string');
@@ -552,6 +604,7 @@ export function decisionsSection(decisions) {
     : `[decision](${entry.url})`);
   return ['## Decisions', '', ...decisions.map((entry) => [
     `- ${entry.question ?? 'Question not recorded'} → ${entry.choice} (${link(entry)})`,
+    ...(entry.insteadOf ? [`instead of a block (${entry.insteadOf})`] : []),
     ...(entry.alternatives.length > 0 ? [`alternatives: ${entry.alternatives.join('; ')}`] : []),
     `evidence: ${entry.why}`,
     ...(entry.answer ? [`reversed by @${entry.answer.by}: ${entry.answer.text}`] : []),
@@ -604,7 +657,7 @@ export function parseBlock(body) {
     && text(parsed.question) && !parsed.question.includes('\n') && Number.isFinite(Date.parse(parsed.at)));
 }
 
-export function markBlocked({ issue, reason, question, gate = 'human:decide', note = '', reviewFingerprint = null, reviewRound = null, run, now = Date.now() }) {
+export function markBlocked({ issue, reason, matter = null, question, gate = 'human:decide', note = '', autoDecide = false, reviewFingerprint = null, reviewRound = null, run, now = Date.now() }) {
   if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
   if (!REASON_RE.test(reason ?? '')) return refusal('INVALID_ARGS', '--reason: expected an UPPER_SNAKE reason code');
   if (!text(question) || question.includes('\n')) return refusal('INVALID_ARGS', '--question: expected one non-empty line');
@@ -619,11 +672,25 @@ export function markBlocked({ issue, reason, question, gate = 'human:decide', no
     return refusal('NON_HUMAN_BLOCK_REASON',
       `--reason: expected one of ${[...HUMAN_BLOCK_REASONS].join(', ')}. Tool faults require fix or decide, not a human block. Do not rename a tool fault to a human reason.`);
   }
-  const facts = issueFacts(run, issue, 'state,labels');
+  if (!HARD_MATTERS.has(matter) && !AUTO_MATTERS.has(matter)) {
+    return refusal('INVALID_ARGS', `--matter: expected one of ${[...HARD_MATTERS, ...AUTO_MATTERS.keys()].join(', ')}`);
+  }
+  if ((matter === 'irreversible') !== (reason === 'IRREVERSIBLE_ACTION')) {
+    return refusal('INVALID_ARGS', '--matter irreversible goes with --reason IRREVERSIBLE_ACTION, every other matter with POLICY_DENIED');
+  }
+  const decidable = autoDecide && AUTO_MATTERS.has(matter);
+  const autoDecidable = () => refusal('BLOCK_AUTO_DECIDABLE',
+    `autoDecide is on, so a ${matter} matter is decided, not blocked: unit.mjs --decide --issue ${issue} --instead-of ${matter} `
+    + `--question "<one line>" --choice "<recommendation>" --why "<evidence>"; the recommendation: ${AUTO_MATTERS.get(matter)}. `
+    + '`"autoDecide": false` in .autoloop/config.json restores the block.');
+  if (decidable && matter !== 'open-findings') return autoDecidable();
+  const facts = issueFacts(run, issue, decidable ? 'state,labels,comments' : 'state,labels');
   if (facts?.state !== 'OPEN') return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
+  // The hand-off after the loop's one rework is the human's.
+  if (decidable && !reworkSpent(facts.comments)) return autoDecidable();
   // Resolved before the label edit: the edit is the call a caller checks last.
   const commonDir = commonDirOf(run);
-  const block = { issue, class: 'human', reason, question: text(question), at: new Date(now).toISOString(), ...binding };
+  const block = { issue, class: 'human', reason, matter, question: text(question), at: new Date(now).toISOString(), ...binding };
   const body = [
     blockMarker(block),
     `**autoloop: blocked — needs a human authorization** (\`${reason}\`)`,
@@ -1026,6 +1093,7 @@ export function decisionRows(issues, now) {
         number: item.number,
         title: item.title,
         choice: decision.choice,
+        ...(typeof decision.insteadOf === 'string' ? { insteadOf: decision.insteadOf } : {}),
         at: decision.at,
         answer: answered ? (answered.match[1] ?? '').trim() : null,
         answeredBy: answered?.by ?? null,
@@ -1033,6 +1101,12 @@ export function decisionRows(issues, now) {
     })
     .filter(Boolean)
     .sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
+}
+
+function decidedSection(heading, rows, label) {
+  return rows.length === 0 ? [] : ['', heading, '', ...rows.map((row) => (row.answer === null
+    ? `- #${row.number} ${row.title} — ${label(row)}: ${row.choice}`
+    : `- #${row.number} ${row.title} — ${label(row)}: ${row.choice}; @${row.answeredBy} answered: ${row.answer}`))];
 }
 
 export function digestBody(rows, at, decided = []) {
@@ -1043,12 +1117,10 @@ export function digestBody(rows, at, decided = []) {
     ...(rows.length === 0
       ? ['Nothing waiting.']
       : rows.map((row) => `- #${row.number}${row.labels.length > 0 ? ` [${row.labels.join(', ')}]` : ''} ${row.title} — ${row.question}`)),
-    ...(decided.length === 0
-      ? []
-      : ['', '**Decided by the loop** — the recommended option, taken without waiting', '',
-        ...decided.map((row) => (row.answer === null
-          ? `- #${row.number} ${row.title} — decided, reversible: ${row.choice}`
-          : `- #${row.number} ${row.title} — decided: ${row.choice}; @${row.answeredBy} answered: ${row.answer}`))]),
+    ...decidedSection('**Decided by the loop** — the recommended option, taken without waiting',
+      decided.filter(({ insteadOf }) => !insteadOf), (row) => `decided${row.answer === null ? ', reversible' : ''}`),
+    ...decidedSection('**Auto-decided instead of a block** — autoDecide took the recommendation; `/answer` on the unit reverses it',
+      decided.filter(({ insteadOf }) => insteadOf), (row) => `instead of a block (${row.insteadOf})`),
     '',
     'The loop rewrites this at every close and park. Answer on each unit, not here.',
   ].join('\n');
@@ -1105,7 +1177,7 @@ export function postDigest({ run, now = Date.now() }) {
 }
 
 export function parseArgs(args) {
-  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, onPr: null, paths: [], boundaryFile: null, snapshot: null, post: false, note: '', choice: null, why: null, alternatives: [], reason: null, question: null, gate: 'human:decide', parent: null, title: null, bodyFile: null, blocksParent: false, out: null, reviewFingerprint: null, reviewRound: null, error: null };
+  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, onPr: null, paths: [], boundaryFile: null, snapshot: null, post: false, note: '', choice: null, why: null, alternatives: [], reason: null, matter: null, insteadOf: null, question: null, gate: 'human:decide', parent: null, title: null, bodyFile: null, blocksParent: false, out: null, reviewFingerprint: null, reviewRound: null, error: null };
   const value = (index) => args[index + 1];
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index];
@@ -1123,9 +1195,9 @@ export function parseArgs(args) {
       if (number === null) return { ...parsed, error: `${flag}: expected a positive number` };
       parsed[{ '--issue': 'issue', '--pr': 'pr', '--on-issue': 'onIssue', '--minutes': 'minutes', '--parent': 'parent', '--on-pr': 'onPr', '--review-round': 'reviewRound' }[flag]] = number;
       index += 1;
-    } else if (['--commit', '--note', '--choice', '--why', '--reason', '--question', '--gate', '--title', '--body-file', '--out', '--boundary-file', '--snapshot', '--review-fingerprint'].includes(flag)) {
+    } else if (['--commit', '--note', '--choice', '--why', '--reason', '--matter', '--instead-of', '--question', '--gate', '--title', '--body-file', '--out', '--boundary-file', '--snapshot', '--review-fingerprint'].includes(flag)) {
       if (value(index) === undefined) return { ...parsed, error: `${flag}: expected a value` };
-      parsed[{ '--body-file': 'bodyFile', '--boundary-file': 'boundaryFile', '--review-fingerprint': 'reviewFingerprint' }[flag] ?? flag.slice(2)] = value(index);
+      parsed[{ '--body-file': 'bodyFile', '--boundary-file': 'boundaryFile', '--review-fingerprint': 'reviewFingerprint', '--instead-of': 'insteadOf' }[flag] ?? flag.slice(2)] = value(index);
       index += 1;
     } else if (flag === '--alternatives' || flag === '--paths') {
       if (value(index) === undefined) return { ...parsed, error: `${flag}: expected a value` };
@@ -1290,7 +1362,7 @@ function selfTest() {
         markDecided({ issue: 5, question: 'Which spec wins?', choice: 'the newer', why: 'dated', run: decides.run, now: 8000 });
         const blockResponses = [['gh issue view 7', '{"state":"OPEN","labels":[]}'], ['gh issue comment 7', ''], ['gh issue edit 7', ''], git];
         const blocks = fakeRun(blockResponses);
-        const blocked = markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'May it proceed?', run: blocks.run, now: 9000 });
+        const blocked = markBlocked({ issue: 7, reason: 'POLICY_DENIED', matter: 'permission', question: 'May it proceed?', run: blocks.run, now: 9000 });
         const condition = { on: 'issue', number: 4 };
         const lifts = fakeRun([['gh issue list', JSON.stringify([{ number: 5, comments: [{ body: waitMarker(condition) }] }])],
           ['gh issue view 4', 'CLOSED'], ['gh issue edit', ''], git]);
@@ -1298,7 +1370,7 @@ function selfTest() {
         const { events } = readEvents(scratch);
         const kinds = events.map((event) => `${event.kind}:${event.issue}:${event.at}`).join(' ');
         chmodSync(join(scratch, 'autoloop', 'events.jsonl'), 0o400);
-        const again = markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'May it proceed?', run: fakeRun(blockResponses).run, now: 9500 });
+        const again = markBlocked({ issue: 7, reason: 'POLICY_DENIED', matter: 'permission', question: 'May it proceed?', run: fakeRun(blockResponses).run, now: 9500 });
         chmodSync(join(scratch, 'autoloop', 'events.jsonl'), 0o644);
         return blocked.ok === true && blocks.calls.at(-1).startsWith('gh issue edit 7 --add-label loop-blocked')
           && kinds === 'wait:5:7000 decision:5:8000 block:7:9000 resume:5:10000'
@@ -1700,7 +1772,7 @@ function selfTest() {
   check('a decision comment is never read as a blocked unit\'s question',
     blockedThenDecided[0].question === 'Blocked: what length?');
 
-  const block = { issue: 7, class: 'human', reason: 'POLICY_DENIED', question: 'May the unit install the new dependency?', at: decidedAt };
+  const block = { issue: 7, class: 'human', reason: 'POLICY_DENIED', matter: 'dependency', question: 'May the unit install the new dependency?', at: decidedAt };
   check('a block marker round-trips, the newest wins, junk is skipped',
     JSON.stringify(parseBlock(blockMarker(block))) === JSON.stringify(block)
     && parseBlock(`${blockMarker(block)}\n${blockMarker({ ...block, question: 'later?' })}`).question === 'later?'
@@ -1737,7 +1809,7 @@ function selfTest() {
       ['gh issue comment 7', ''], ['gh issue edit 7', ''],
     ]);
     const note = 'Permission denied: protected path.\nKeep this exact evidence.';
-    const result = markBlocked({ issue: 7, reason, question: 'May the requested action proceed?', note, run: human.run });
+    const result = markBlocked({ issue: 7, reason, matter: reason === 'IRREVERSIBLE_ACTION' ? 'irreversible' : 'permission', question: 'May the requested action proceed?', note, run: human.run });
     check(`${reason} creates a human block and preserves its evidence`,
       result.ok && result.block.reason === reason
       && human.calls.some((call) => call.startsWith('gh issue comment 7') && call.includes(note))
@@ -1761,7 +1833,7 @@ function selfTest() {
     ['gh issue comment 7', ''],
     ['gh issue edit 7', ''],
   ]);
-  const blocked = markBlocked({ issue: 7, reason: block.reason, question: block.question, run: blocking.run, now: Date.parse(decidedAt) });
+  const blocked = markBlocked({ issue: 7, reason: block.reason, matter: block.matter, question: block.question, run: blocking.run, now: Date.parse(decidedAt) });
   const labelEdit = blocking.calls.find((call) => call.startsWith('gh issue edit 7'));
   check('a block comments the marker with the /answer form, then swaps labels in one edit, keeping loop-ready',
     blocked.ok && blocked.disposition === 'blocked'
@@ -1775,15 +1847,130 @@ function selfTest() {
     ['gh issue comment 9', ''], ['gh issue edit 9', ''],
   ]);
   check('a block of a unit under revision drops loop-delivered and the revising label too',
-    markBlocked({ issue: 9, reason: 'POLICY_DENIED', question: 'May the denied action proceed?', run: revising.run }).ok
+    markBlocked({ issue: 9, reason: 'POLICY_DENIED', matter: 'permission', question: 'May the denied action proceed?', run: revising.run }).ok
     && revising.calls.at(-1) === 'gh issue edit 9 --add-label loop-blocked,human:decide --remove-label loop-delivered,loop:revising');
   const authorizing = fakeRun([['gh issue view 8', '{"state":"OPEN","labels":[]}'], ['gh issue comment 8', ''], ['gh issue edit 8', '']]);
   check('a protected-path block carries human:authorize and removes nothing it did not find',
-    markBlocked({ issue: 8, reason: 'POLICY_DENIED', question: 'May this unit touch .github/workflows?', gate: 'human:authorize', run: authorizing.run }).ok
+    markBlocked({ issue: 8, reason: 'POLICY_DENIED', matter: 'protected-build', question: 'May this unit touch .github/workflows?', gate: 'human:authorize', run: authorizing.run }).ok
     && authorizing.calls.at(-1) === 'gh issue edit 8 --add-label loop-blocked,human:authorize');
   const blockClosed = fakeRun([['gh issue view 7', '{"state":"CLOSED","labels":[]}']]);
   check('a block on an issue that is not open is refused',
-    markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'q?', run: blockClosed.run }).code === 'ISSUE_NOT_OPEN');
+    markBlocked({ issue: 7, reason: 'POLICY_DENIED', matter: 'permission', question: 'q?', run: blockClosed.run }).code === 'ISSUE_NOT_OPEN');
+  // SPEC-auto-decide: each block names its matter. A hard matter blocks; an
+  // auto-decidable one is decided while autoDecide is on, except the
+  // open-findings hand-off after the loop's one rework.
+  const blockOn = (matter, extra = {}, comments = []) => {
+    const github = fakeRun([['gh issue view 7', JSON.stringify({ state: 'OPEN', labels: [], comments })], ['gh issue comment 7', ''], ['gh issue edit 7', '']]);
+    const reason = matter === 'irreversible' ? 'IRREVERSIBLE_ACTION' : 'POLICY_DENIED';
+    return { result: markBlocked({ issue: 7, reason, matter, question: 'May it proceed?', autoDecide: true, run: github.run, ...extra }), calls: github.calls };
+  };
+  check('a block names a known matter that agrees with its reason, before any call',
+    markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'q?', run: unblockable.run }).code === 'INVALID_ARGS'
+    && markBlocked({ issue: 7, reason: 'POLICY_DENIED', matter: 'taste', question: 'q?', run: unblockable.run }).code === 'INVALID_ARGS'
+    && markBlocked({ issue: 7, reason: 'POLICY_DENIED', matter: 'irreversible', question: 'q?', run: unblockable.run }).code === 'INVALID_ARGS'
+    && markBlocked({ issue: 7, reason: 'IRREVERSIBLE_ACTION', matter: 'secret', question: 'q?', run: unblockable.run }).code === 'INVALID_ARGS'
+    && unblockable.calls.length === 0);
+  // trust-marker is a human's: a decision that leaves the marker refused
+  // moves nothing, and only a block takes the unit out of the queue.
+  check('with autoDecide on a hard matter still blocks and its marker names the matter',
+    ['irreversible', 'secret', 'dependency', 'merge-authorization', 'permission', 'trust-marker'].every((matter) => {
+      const { result, calls } = blockOn(matter);
+      return result.ok && parseBlock(calls.find((call) => call.startsWith('gh issue comment 7')))?.matter === matter;
+    }));
+  check('with autoDecide on an auto-decidable matter is refused before any call, naming the --decide form',
+    ['state-exception', 'protected-build', 'product-value'].every((matter) => {
+      const { result, calls } = blockOn(matter);
+      return result.code === 'BLOCK_AUTO_DECIDABLE' && calls.length === 0
+        && result.message.includes(`--instead-of ${matter}`) && result.message.includes('autoDecide');
+    }));
+  check('with autoDecide off every matter blocks',
+    ['state-exception', 'protected-build', 'product-value', 'open-findings'].every((matter) => blockOn(matter, { autoDecide: false }).result.ok));
+  const spentRework = { author: { login: 'loop' }, viewerDidAuthor: true, body: decisionMarker({ issue: 7, question: 'Rework?', choice: 'rework once',
+    alternatives: [], why: 'w', at: decidedAt, insteadOf: 'open-findings' }) };
+  const specGapDecision = { ...spentRework, body: decisionMarker({ issue: 7, question: 'Which length?', choice: 'the shorter',
+    alternatives: [], why: 'w', at: decidedAt }) };
+  const handOff = blockOn('open-findings');
+  check('the open-findings hand-off is decided until the loop\'s one rework is spent, then blocks',
+    handOff.result.code === 'BLOCK_AUTO_DECIDABLE' && handOff.calls[0].includes('--json state,labels,comments')
+    && blockOn('open-findings', {}, [{ ...spentRework, viewerDidAuthor: false }]).result.code === 'BLOCK_AUTO_DECIDABLE'
+    && blockOn('open-findings', {}, [specGapDecision]).result.code === 'BLOCK_AUTO_DECIDABLE'
+    && blockOn('open-findings', {}, [spentRework]).result.ok === true);
+  const insteadDecided = fakeRun([['gh issue view 7', 'OPEN'], ['gh issue comment 7', 'https://x/7#c2'], ['gh issue edit 7', '']]);
+  const reworkDecide = (comments) => {
+    const github = fakeRun([['gh issue view 7', JSON.stringify({ state: 'OPEN', comments })], ['gh issue comment 7', 'https://x/7#c3'], ['gh issue edit 7', '']]);
+    return { result: markDecided({ issue: 7, question: 'Rework?', choice: 'rework once', why: 'w', insteadOf: 'open-findings',
+      reviewFingerprint: 'c'.repeat(64), reviewRound: 5, autoDecide: true, run: github.run }), calls: github.calls };
+  };
+  const firstRework = reworkDecide([specGapDecision]);
+  check('a decision taken instead of a block names its matter; a hard matter is never decided',
+    markDecided({ issue: 7, question: 'Comply?', choice: 'comply', why: 'STATE says so', insteadOf: 'state-exception', autoDecide: true, run: insteadDecided.run }).ok
+    && parseDecision(insteadDecided.calls.find((call) => call.startsWith('gh issue comment 7'))).insteadOf === 'state-exception'
+    && markDecided({ issue: 7, question: 'q?', choice: 'c', why: 'w', insteadOf: 'secret', autoDecide: true, run: unblockable.run }).code === 'DECIDE_HARD_MATTER'
+    && markDecided({ issue: 7, question: 'q?', choice: 'c', why: 'w', insteadOf: 'trust-marker', autoDecide: true, run: unblockable.run }).code === 'DECIDE_HARD_MATTER'
+    && markDecided({ issue: 7, question: 'q?', choice: 'c', why: 'w', insteadOf: 'taste', autoDecide: true, run: unblockable.run }).code === 'INVALID_ARGS'
+    // The one rework the open-findings exception counts must be grantable.
+    && markDecided({ issue: 7, question: 'q?', choice: 'rework once', why: 'w', insteadOf: 'open-findings', autoDecide: true, run: unblockable.run }).code === 'INVALID_ARGS'
+    && markDecided({ issue: 7, question: 'q?', choice: 'accept', why: 'w', insteadOf: 'open-findings',
+      reviewFingerprint: 'c'.repeat(64), reviewRound: 5, autoDecide: true, run: unblockable.run }).code === 'INVALID_ARGS'
+    && unblockable.calls.length === 0);
+  check('with autoDecide off a decision instead of a block is refused before any call; a plain decision is not',
+    markDecided({ issue: 7, question: 'q?', choice: 'c', why: 'w', insteadOf: 'state-exception', run: unblockable.run }).code === 'AUTO_DECIDE_OFF'
+    && unblockable.calls.length === 0
+    && markDecided({ issue: 7, question: 'q?', choice: 'c', why: 'w', run: fakeRun([['gh issue view 7', 'OPEN'], ['gh issue comment 7', ''], ['gh issue edit 7', '']]).run }).ok);
+  check('the loop decides one rework per unit: a second is refused and names the block',
+    firstRework.result.ok && firstRework.calls[0].includes('comments')
+    && reworkDecide([spentRework]).result.code === 'REWORK_SPENT'
+    && reworkDecide([spentRework]).calls.every((call) => !call.startsWith('gh issue comment'))
+    && /--block --reason POLICY_DENIED --matter open-findings/u.test(reworkDecide([spentRework]).result.message)
+    && reworkDecide([{ ...spentRework, viewerDidAuthor: false }]).result.ok
+    && markDecided({ issue: 7, question: 'Rework?', choice: 'rework once', why: 'w', insteadOf: 'open-findings',
+      reviewFingerprint: 'c'.repeat(64), reviewRound: 5, autoDecide: true, run: fakeRun([['gh issue view 7', '{"state":"CLOSED"}']]).run }).code === 'ISSUE_NOT_OPEN'
+    && parseArgs(['--block', '--issue', '7', '--matter', 'secret']).matter === 'secret'
+    && parseArgs(['--decide', '--issue', '7', '--instead-of', 'state-exception']).insteadOf === 'state-exception');
+  const autoRows = decisionRows([{ number: 7, title: 'Auto', comments: [{ body: decisionMarker({ issue: 7, question: 'Comply?', choice: 'comply',
+    alternatives: [], why: 'w', at: decidedAt, insteadOf: 'state-exception' }) }] }], Date.parse(decidedAt));
+  const autoDigest = digestBody([], decidedAt, autoRows);
+  check('the digest lists a decision taken instead of a block under its own heading',
+    autoRows[0].insteadOf === 'state-exception' && /\*\*Auto-decided instead of a block\*\*/u.test(autoDigest)
+    && autoDigest.includes('#7 Auto — instead of a block (state-exception): comply')
+    && !/\*\*Decided by the loop\*\*/u.test(autoDigest)
+    && decisionsSection(unitDecisions([{ ...spentRework, url: 'https://x/7#c1' }])).includes('instead of a block (open-findings)'));
+  check('the CLI reads autoDecide from the project config: on unless false',
+    (() => {
+      const scratch = mkdtempSync(join(tmpdir(), 'unit-auto-decide-'));
+      try {
+        // git alone on PATH: no gh, so nothing reaches GitHub.
+        const bin = join(scratch, 'bin');
+        mkdirSync(bin);
+        symlinkSync(spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim(), join(bin, 'git'));
+        const repo = join(scratch, 'repo');
+        mkdirSync(join(repo, '.autoloop'), { recursive: true });
+        spawnSync('git', ['init', '-q', repo]);
+        const configPath = join(repo, '.autoloop', 'config.json');
+        // A config text, or null for no file. ISSUE_NOT_OPEN: the matter got
+        // past the autoDecide check and reached the (absent) gh.
+        const cliWith = (config, args) => {
+          rmSync(configPath, { force: true });
+          if (config !== null) {
+            writeFileSync(configPath, typeof config === 'string' ? config
+              : JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'true' }, ...config }));
+          }
+          const cli = spawnSync(process.execPath, [fileURLToPath(import.meta.url), ...args, '--issue', '7', '--question', 'Comply?'],
+            { cwd: repo, encoding: 'utf8', timeout: 15000, env: { ...process.env, PATH: bin } });
+          try { return JSON.parse(cli.stdout).code; } catch { return `unparsed: ${cli.stdout}${cli.stderr}`; }
+        };
+        const blockWith = (config) => cliWith(config, ['--block', '--reason', 'POLICY_DENIED', '--matter', 'state-exception']);
+        const decideWith = (config) => cliWith(config, ['--decide', '--instead-of', 'state-exception', '--choice', 'comply', '--why', 'STATE']);
+        return blockWith({}) === 'BLOCK_AUTO_DECIDABLE' && blockWith({ autoDecide: true }) === 'BLOCK_AUTO_DECIDABLE'
+          && blockWith({ autoDecide: false }) === 'ISSUE_NOT_OPEN'
+          // An absent or unreadable config blocks: the human is the safe side.
+          && blockWith(null) === 'ISSUE_NOT_OPEN' && blockWith('{not json') === 'ISSUE_NOT_OPEN'
+          && decideWith({}) === 'ISSUE_NOT_OPEN' && decideWith({ autoDecide: false }) === 'AUTO_DECIDE_OFF'
+          && decideWith(null) === 'AUTO_DECIDE_OFF' && decideWith('{not json') === 'AUTO_DECIDE_OFF';
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    })());
   const markedRows = digestRows([{
     number: 7, title: 'Labels', labels: [{ name: 'human:decide' }],
     comments: [{ body: `${blockMarker(block)}\n**autoloop: blocked**` }, { body: 'a later note' }],
@@ -1902,11 +2089,11 @@ function selfTest() {
   const reviewMarked = fakeRun([['gh issue view 7', '{"state":"OPEN","labels":[]}'], ['gh issue comment 7', ''], ['gh issue edit 7', '']]);
   const reviewDecided = fakeRun([['gh issue view 7', 'OPEN'], ['gh issue comment 7', 'https://x/7#c1'], ['gh issue edit 7', '']]);
   check('a block or decision on a review hand-off records its round and evidence; a half or malformed pair is refused',
-    markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'Accept, rework or drop?', reviewFingerprint: handoffFp, reviewRound: 5, run: reviewMarked.run }).ok
+    markBlocked({ issue: 7, reason: 'POLICY_DENIED', matter: 'open-findings', question: 'Accept, rework or drop?', reviewFingerprint: handoffFp, reviewRound: 5, run: reviewMarked.run }).ok
     && parseBlock(reviewMarked.calls.find((line) => line.startsWith('gh issue comment 7'))).reviewFingerprint === handoffFp
     && markDecided({ issue: 7, question: 'Rework?', choice: 'rework once', why: 'w', reviewFingerprint: handoffFp, reviewRound: 5, run: reviewDecided.run }).ok
     && parseDecision(reviewDecided.calls.find((line) => line.startsWith('gh issue comment 7'))).reviewRound === 5
-    && markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'q?', reviewFingerprint: handoffFp, run: reviewMarked.run }).code === 'INVALID_ARGS'
+    && markBlocked({ issue: 7, reason: 'POLICY_DENIED', matter: 'open-findings', question: 'q?', reviewFingerprint: handoffFp, run: reviewMarked.run }).code === 'INVALID_ARGS'
     && markDecided({ issue: 7, question: 'q?', choice: 'c', why: 'w', reviewFingerprint: 'zz', reviewRound: 5, run: reviewDecided.run }).code === 'INVALID_ARGS'
     && parseArgs(['--rework-authorization', '--issue', '7', '--review-fingerprint', handoffFp, '--out', 'g.json']).mode === 'rework-authorization'
     && /--out/u.test(parseArgs(['--rework-authorization', '--issue', '7', '--review-fingerprint', handoffFp]).error ?? '')
@@ -2070,8 +2257,9 @@ function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
     console.error(`unit: ${parsed.error}`);
-    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720 | --on-pr M --paths A,B/) [--note T] | --overlap --issue N --boundary-file PATH --snapshot PATH | --repair --parent N --title T --body-file PATH [--blocks-parent] | --block --issue N --reason CODE --question T [--gate human:authorize] [--note T] [--review-fingerprint H --review-round R] | --decide --issue N --question T --choice T --why T [--alternatives "A; B"] [--review-fingerprint H --review-round R] | --decisions --issue N [--out PATH] | --rework-authorization --issue N --review-fingerprint H --out PATH | --lift | --digest [--post] | --self-test');
+    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720 | --on-pr M --paths A,B/) [--note T] | --overlap --issue N --boundary-file PATH --snapshot PATH | --repair --parent N --title T --body-file PATH [--blocks-parent] | --block --issue N --reason CODE --matter M --question T [--gate human:authorize] [--note T] [--review-fingerprint H --review-round R] | --decide --issue N --question T --choice T --why T [--alternatives "A; B"] [--instead-of M] [--review-fingerprint H --review-round R] | --decisions --issue N [--out PATH] | --rework-authorization --issue N --review-fingerprint H --out PATH | --lift | --digest [--post] | --self-test');
     console.error(`human block reasons: ${[...HUMAN_BLOCK_REASONS].join(', ')}; retired (use --decide): ${[...RETIRED_BLOCK_REASONS].join(', ')}`);
+    console.error(`matters: hard ${[...HARD_MATTERS].join(', ')}; decided while autoDecide is on ${[...AUTO_MATTERS.keys()].join(', ')}`);
     process.exit(2);
   }
   if (parsed.mode === 'self-test') process.exit(selfTest() ? 0 : 1);
@@ -2095,7 +2283,10 @@ function main() {
     process.exit(outcome.ok ? 0 : 1);
   }
   if (parsed.mode === 'decide' || parsed.mode === 'block') {
-    const outcome = parsed.mode === 'decide' ? markDecided({ ...parsed, run }) : markBlocked({ ...parsed, run });
+    // An unreadable config blocks: the human is the safe side.
+    const config = resolveProjectConfig(root);
+    const autoDecide = config?.ok === true && autoDecideEnabled(config.config);
+    const outcome = parsed.mode === 'decide' ? markDecided({ ...parsed, autoDecide, run }) : markBlocked({ ...parsed, autoDecide, run });
     console.log(JSON.stringify(outcome, null, 1));
     process.exit(outcome.ok ? 0 : 1);
   }

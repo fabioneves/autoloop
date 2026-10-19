@@ -43,7 +43,8 @@ login cannot separate writer from approver. Without both, the finalizer refuses 
   one-shot runner; never run a live or watch-mode service against unreviewed code.
 - **A human gate stops a unit, never the run.** Blocked, deferred and human-decision units are
   labelled with an evidence-backed reason; the run continues to the next eligible unit and closes
-  only on a drained queue, a stated bound, or a context handoff.
+  only on a drained queue, a stated bound, or a context handoff. While `autoDecide` is on (the
+  default), only a hard-safety matter blocks; every other question is a recorded decision.
 - **New dependencies and secrets hard-defer.** The loop proposes; it never installs or writes them.
 
 ## Protected ground

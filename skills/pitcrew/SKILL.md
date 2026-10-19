@@ -203,7 +203,8 @@ skipped.
    - verified out-of-delta Critical/Major is fixed and the next round is full;
    - a Major open after three fix rounds is decided, re-planned once, or deferred
      (`REVIEW_REPLAN`, dev skill step 8); after the re-plan round a Major is `REVIEW_OPEN_FINDINGS`
-     (draft, `human:decide`) and a Critical blocks `POLICY_DENIED`.
+     (draft, `human:decide`) and a Critical blocks `POLICY_DENIED`, unless `autoDecide` reworks once
+     (dev skill step 8).
 
    Invoke `node <plugin-tools>/review-contract.mjs` on stdin with
    `{round,scope,projectConfig,expected:{planFingerprint,repositoryFingerprint,configuredBaseOid,artifactVersion,artifactFingerprint,headOid},findingAnnotations:[{id,verified,inScope}],reviewRounds:[...]}`
@@ -274,7 +275,9 @@ waits and any identity mismatch blocks.
 Under manual policy, stop after current-head delivery and the pre-merge record.
 
 Only a human matter uses `node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE>
---question "<one line>"`: `IRREVERSIBLE_ACTION` or `POLICY_DENIED` (Dev's Autonomy rules). It records `/answer`, keeps `loop-ready`, and stops that PR.
+--matter <matter> --question "<one line>"`: `IRREVERSIBLE_ACTION` or `POLICY_DENIED` (Dev's Autonomy rules). It records `/answer`, keeps `loop-ready`, and stops that PR.
+While `autoDecide` is on, an auto-decidable matter is refused (`BLOCK_AUTO_DECIDABLE`): take
+`unit.mjs --decide --instead-of <matter>` with its recommendation and continue.
 Tool faults and incomplete evidence are not human decisions. Keep the refusal; fix or decide.
 Never rename a fault to a human reason or clear an existing human gate.
 

@@ -42,7 +42,7 @@ import { vendoredLeftovers } from './hook-root.mjs';
 import { closeLatch, latchDirectory, processStart, recordHostSession, recordLatch, sessionOwnerPid, takeHostSession } from './run-markers.mjs';
 import { ancestorPids, liveRunsElsewhere, sessionLineage, loopRunIsLive, loopRunIsOpen, ownedRun, ownRunMarkers, pinnedModelsPath, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
-  effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig, reviewedConfig,
+  autoDecideEnabled, effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig, reviewedConfig,
 } from './config-contract.mjs';
 import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
@@ -444,6 +444,7 @@ export function configSummary(config, root = null) {
     gateCommand: config.gate.command,
     checklistPath: config.review.checklistPath,
     checklistFile: root === null ? null : effectiveChecklistPath(root, config),
+    autoDecide: autoDecideEnabled(config),
     fingerprint: hashValue(reviewedConfig(config)),
     projectConfig: reviewedConfig(config),
   };
@@ -789,6 +790,11 @@ export function blockLines(blocks, halted = null) {
   ];
 }
 
+export function configLine(config) {
+  return `config ${config.version}  merge ${config.mergePolicy}`
+    + `  auto-decide ${config.autoDecide ? 'on' : 'off'}  gate ${config.gateCommand}`;
+}
+
 function report(summary) {
   if (summary.ok !== true) {
     return `prime ${summary.step} FAILED  ${summary.error.code}\n${summary.error.message}`;
@@ -800,8 +806,7 @@ function report(summary) {
     `base   ${summary.base.baseBranch}`
     + `  on-base ${summary.base.onBase ? 'yes' : 'no'}`
     + `  behind ${summary.base.behindRemoteBase ?? '?'}`,
-    `config ${summary.config.version}  merge ${summary.config.mergePolicy}`
-    + `  gate ${summary.config.gateCommand}`,
+    configLine(summary.config),
     `scratch ${summary.scratch.root ?? `unavailable: ${summary.scratch.error}`}`,
     `scan   ${summary.timings.scanMs}ms  prime ${summary.timings.primeMs}ms`
     + `  snapshot ${summary.snapshotBytes}B -> ${summary.snapshotPath}`,
@@ -982,6 +987,14 @@ function selfTest() {
     && configSummary(Object.fromEntries(
       Object.entries(fixtureConfig()).reverse(),
     )).fingerprint === summary.fingerprint,
+  );
+  check(
+    'the summary names whether a question takes its recommendation (autoDecide), outside the fingerprint',
+    summary.autoDecide === true
+      && configSummary({ ...fixtureConfig(), autoDecide: false }).autoDecide === false
+      && configSummary({ ...fixtureConfig(), autoDecide: false }).fingerprint === summary.fingerprint
+      && configLine(summary).includes('  auto-decide on  ')
+      && configLine(configSummary({ ...fixtureConfig(), autoDecide: false })).includes('  auto-decide off  '),
   );
   check(
     'the summary names the checklist file reviewers read, outside the fingerprinted config',

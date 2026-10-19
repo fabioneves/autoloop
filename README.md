@@ -200,7 +200,14 @@ its issue on every later ribbon. The contract is `docs/specs/SPEC-events.md`.
 
 v0.72.0 uses schema `0.28.0`. Settings live in `.autoloop/config.json`, overrides only — plugin
 defaults fill the rest: `version`, `baseBranch`, `gate`, `merge`, `tracker`, `review`, and the
-optional `protectedPaths` and `ui`. The repository owns it; plugin updates never overwrite it.
+optional `protectedPaths`, `ui` and `autoDecide`. The repository owns it; plugin updates never
+overwrite it.
+
+`autoDecide` (on unless `false`): a question takes its recommendation as a recorded, reversible
+decision, and only a hard-safety matter waits for a human — an irreversible act, a secret, a
+dependency, a merge authorization, a permission, or an invalid marker from a trusted author. At
+the review hand-off after the re-plan round the loop reworks once; a finding still open after that
+goes to you as a draft. `docs/specs/SPEC-auto-decide.md`.
 
 `protectedPaths` lists the repository's own human-authorization globs (`*` and `**` only), added to
 the built-in families. The plugin protects only secret and credential paths (`.env*`, key material,

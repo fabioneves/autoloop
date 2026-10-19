@@ -63,6 +63,7 @@ const DISPATCH_STEP = {
 
 // Returns null when the command is not a loop-label swap on an issue.
 // opts.archMap: docs/agentic/ARCH.md exists → step 6 also reminds the map update.
+// opts.output: the command's stdout, when the host passes it.
 export function reminderFor(command, opts = {}) {
   if (typeof command !== 'string') return null;
   if (/\bstep\.mjs\b/.test(command)) return stepReminder(command, opts);
@@ -124,6 +125,15 @@ export function reminderFor(command, opts = {}) {
   // gh edit fires the blocked riders on this path.
   if (/\bunit\.mjs\b[^\n]*\s--block\b/.test(command)) {
     const n = `#${command.match(/--issue[= ]+(\d+)/)?.[1] ?? '<N>'}`;
+    let outcome = null;
+    try { outcome = JSON.parse(opts.output ?? ''); } catch { /* no output: the general rider */ }
+    if (outcome?.ok === false) {
+      const remedy = outcome.code === 'BLOCK_AUTO_DECIDABLE'
+        ? 'record the recommendation with the `--decide --instead-of` form it names and continue the unit'
+        : String(outcome.message ?? 'report it verbatim');
+      return `autoloop: \`unit.mjs --block\` for ${n} was refused (${outcome.code}), so the unit is not blocked: `
+        + `no card and no notification. Follow its remedy now: ${remedy}.`;
+    }
     return `autoloop: \`unit.mjs --block\` just ran for ${n}. On an ok result the tool has already `
       + 'posted the question with its `/answer` form and swapped the labels (loop-ready kept), so '
       + `the TERMINAL riders are due NOW: ① the unit's card, \`step.mjs --card --issue `
@@ -152,7 +162,7 @@ export function reminderFor(command, opts = {}) {
       + `① the unit's card, \`step.mjs --card --issue ${n.slice(1)} --outcome blocked\`; `
       + `② PushNotification \`✖ ${n} blocked — <reason gate>\`${PUSH_NOTE} `
       + `③ the block is recorded by \`unit.mjs --block --issue ${n.slice(1)} --reason <CODE> `
-      + `--question "<one line>"\`, which posts the comment, adds the gate label and removes `
+      + `--matter <matter> --question "<one line>"\`, which posts the comment, adds the gate label and removes `
       + `\`loop-started\` and every \`loop:*\` step label itself — never remove them by hand. `
       + `KEEP \`loop-ready\`: \`loop-blocked\` already takes the `
       + `issue out of the eligible queue, and \`loop-ready\` is the human's authorization token `
@@ -270,6 +280,19 @@ function selfTest() {
     console.error('FAIL: ARCH nudge contradicts the no-freshness-metadata contract');
   }
   if (/ARCH\.md/.test(withoutMap)) { fail++; console.error('FAIL: archMap:false leaked ARCH.md nudge'); }
+  // SPEC-auto-decide: a refused --block (BLOCK_AUTO_DECIDABLE under autoDecide)
+  // did not block the unit, so no card and no notification ride it.
+  {
+    const command = 'node tools/unit.mjs --block --issue 12 --reason POLICY_DENIED --matter state-exception --question "q?"';
+    const refused = reminderFor(command, { output: JSON.stringify({ ok: false, code: 'BLOCK_AUTO_DECIDABLE', message: 'decide it' }, null, 1) });
+    const invalid = reminderFor(command, { output: JSON.stringify({ ok: false, code: 'INVALID_ARGS', message: '--matter is required' }) });
+    const blocked = reminderFor(command, { output: JSON.stringify({ ok: true, disposition: 'blocked' }, null, 1) });
+    if (!/--instead-of/.test(refused ?? '') || /PushNotification|--card/.test(refused ?? '') || !/PushNotification/.test(blocked ?? '')
+      || !/--matter is required/.test(invalid ?? '') || /--instead-of|PushNotification/.test(invalid ?? '')) {
+      fail++;
+      console.error('FAIL: a refused --block asks for no card or notification; an ok one does');
+    }
+  }
   // LFE #506: the simplify rider carried a measured diff against the plan's line budget.
   if ([withMap, withoutMap].some((text) => /budget|measured|\blines?\b|line delta|reduction/iu.test(text))) {
     fail++;
@@ -320,7 +343,9 @@ if (entry) {
         // Only the session that owns a run hears riders (hook-root.mjs).
         const root = guardedRoot(input.session_id);
         if (root === null) process.exit(0);
-        const msg = reminderFor(input.tool_input?.command, { archMap: existsSync(join(root, 'docs/agentic/ARCH.md')) });
+        const msg = reminderFor(input.tool_input?.command, {
+          archMap: existsSync(join(root, 'docs/agentic/ARCH.md')), output: input.tool_response?.stdout,
+        });
         if (msg) {
           console.log(JSON.stringify({
             hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: msg },

@@ -97,7 +97,9 @@ absent). Optional keys:
 - `protectedPaths` — the repository's own human-authorization globs, added to the built-in families
   (`*` and `**` only; `spec` names a file, `spec/**` the directory);
 - `merge.loopLogin` — the loop's GitHub login; required by a non-manual policy;
-- `merge.reversiblePaths` — the Path B class under `ratified` (default `["docs/**"]`).
+- `merge.reversiblePaths` — the Path B class under `ratified` (default `["docs/**"]`);
+- `autoDecide` — `false` makes every matter block for a human; absent, only hard-safety matters
+  do (`docs/specs/SPEC-auto-decide.md`).
 
 Unknown keys are refused. Validate only through the contract, which names every error:
 

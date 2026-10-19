@@ -12,6 +12,10 @@ Replace "when unsure, block the unit" with a closed decision rule. A would-be bl
 
 `human` is the **only** class that blocks, and it is closed: a situation not named in it is `fix` or `decide`. "Do not silently redesign scope" becomes "never redesign scope *silently*": a scope change is a `decide` with a recorded decision.
 
+Since 0.72.1, [Auto-decide](SPEC-auto-decide.md) makes `human` smaller still: while `autoDecide` is
+on, only the hard matters (irreversible, secret, dependency, merge authorization, permission, an
+invalid lifecycle marker from a trusted author) block.
+
 ## Behaviour
 
 1. **`autoloop-decision-v1` marker** (new, `templates/tools/unit.mjs --decide`), one bare call:

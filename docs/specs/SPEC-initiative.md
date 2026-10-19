@@ -44,7 +44,9 @@ Every decision the loop takes is recorded where a human will see it, and it is r
 
 Build order: `initiative-policy` → `loop-authored-work`, `blocked-triage` (either order).
 
-Module specs: `SPEC-initiative-policy.md`, `SPEC-loop-authored-work.md`, `SPEC-blocked-triage.md`.
+Module specs: `SPEC-initiative-policy.md`, `SPEC-loop-authored-work.md`, `SPEC-blocked-triage.md`,
+and `SPEC-auto-decide.md` (0.72.1: every question that is not hard safety is a decision while
+`autoDecide` is on).
 
 ## Invariants kept
 
