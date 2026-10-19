@@ -46,8 +46,16 @@
 //
 //   --decisions Every decision of one unit with its comment link, and the
 //               `## Decisions` section the PR body and the run record carry.
-//               A block whose reason is now retired, lifted by `/answer`, is
-//               listed as decided by that answer.
+//               A block whose reason is now retired, or on a review hand-off,
+//               lifted by `/answer`, is listed as decided by that answer.
+//
+//   --rework-authorization  What reopens a unit after the review hand-off
+//               (SPEC-review-rounds §5a): a trusted `/answer rework` to the
+//               loop's block on that hand-off, or the loop's own rework
+//               decision on it, not reversed. `--block` and `--decide` on a
+//               hand-off name it with --review-fingerprint and --review-round;
+//               this writes the authorization review-contract.mjs takes, and
+//               publish-verdict.mjs derives it again from GitHub.
 //
 //   --digest    Every decision waiting on a human, one row each: open loop-blocked
 //               issues and human:authorize PRs, then the loop's own decisions of
@@ -63,10 +71,11 @@
 //   node <plugin-tools>/unit.mjs --obsolete --issue <N> (--pr <M> | --commit <sha>) [--note <text>]
 //   node <plugin-tools>/unit.mjs --wait --issue <N> (--on-issue <M> | --on-base-red | --minutes <1..720> | --on-pr <M> --paths <a,b/>) [--note <text>]
 //   node <plugin-tools>/unit.mjs --overlap --issue <N> --boundary-file <path> --snapshot <path>
-//   node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE> --question <one line> [--gate human:authorize] [--note <text>]
+//   node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE> --question <one line> [--gate human:authorize] [--note <text>] [--review-fingerprint <sha256> --review-round <N>]
 //   node <plugin-tools>/unit.mjs --repair --parent <N> --title <text> --body-file <path> [--blocks-parent]
-//   node <plugin-tools>/unit.mjs --decide --issue <N> --question <one line> --choice <text> --why <text> [--alternatives "<a>; <b>"]
+//   node <plugin-tools>/unit.mjs --decide --issue <N> --question <one line> --choice <text> --why <text> [--alternatives "<a>; <b>"] [--review-fingerprint <sha256> --review-round <N>]
 //   node <plugin-tools>/unit.mjs --decisions --issue <N> [--out <path>]
+//   node <plugin-tools>/unit.mjs --rework-authorization --issue <N> --review-fingerprint <sha256> --out <path>
 //   node <plugin-tools>/unit.mjs --lift
 //   node <plugin-tools>/unit.mjs --digest [--post]
 //   node <plugin-tools>/unit.mjs --self-test
@@ -114,6 +123,8 @@ const LABELS = Object.freeze({
 });
 const GATE_LABEL_RE = /^(?:human:|needs-)/u;
 const QUESTION_MAX = 160;
+const FINGERPRINT_RE = /^[0-9a-f]{64}$/u;
+const REWORK_RE = /^rework\b/iu;
 
 function positive(value) {
   const number = Number(value);
@@ -445,10 +456,20 @@ export function noteDecisionOnStep({ commonDir, issue }) {
   }
 }
 
-export function markDecided({ issue, question, choice, alternatives = [], why, run, now = Date.now() }) {
+// A block or decision on a review hand-off names the hand-off round and its
+// reviewEvidenceFingerprint (SPEC-review-rounds §5a): both or neither.
+function reviewBinding(reviewFingerprint, reviewRound) {
+  if (reviewFingerprint === null && reviewRound === null) return {};
+  if (!FINGERPRINT_RE.test(reviewFingerprint ?? '') || positive(reviewRound) === null) return null;
+  return { reviewFingerprint, reviewRound };
+}
+
+export function markDecided({ issue, question, choice, alternatives = [], why, reviewFingerprint = null, reviewRound = null, run, now = Date.now() }) {
   if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
   if (!text(question) || question.includes('\n')) return refusal('INVALID_ARGS', '--question: expected one non-empty line');
   if (!text(choice) || !text(why)) return refusal('INVALID_ARGS', 'expected a non-empty --choice and --why');
+  const binding = reviewBinding(reviewFingerprint, reviewRound);
+  if (binding === null) return refusal('INVALID_ARGS', '--review-fingerprint <sha256> and --review-round <N> go together');
   if (issueState(run, issue) !== 'OPEN') return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
   const decision = {
     issue,
@@ -457,6 +478,7 @@ export function markDecided({ issue, question, choice, alternatives = [], why, r
     alternatives: alternatives.map((entry) => entry.trim()).filter(Boolean),
     why: text(why),
     at: new Date(now).toISOString(),
+    ...binding,
   };
   const body = [
     decisionMarker(decision),
@@ -485,8 +507,8 @@ export function markDecided({ issue, question, choice, alternatives = [], why, r
 
 /** Pure: a unit's decisions in comment order, from the loop's own markers.
  *  Each carries its comment link and the newest later `/answer`. A block
- *  whose reason is retired, lifted by an answer, is the decision that answer
- *  took. The list is informational: the premise step applies the trust check
+ *  whose reason is retired, or on a review hand-off, lifted by an answer, is
+ *  the decision that answer took. The list is informational: the premise step applies the trust check
  *  before planning from an answer. */
 export function unitDecisions(comments) {
   const list = Array.isArray(comments) ? comments : [];
@@ -512,7 +534,9 @@ export function unitDecisions(comments) {
     const resumed = newestMarker(RESUMED_MARKER_RE, comment.body, (parsed) => positive(parsed?.issue) && text(parsed.by) && typeof parsed.answer === 'string');
     if (resumed === null) return;
     const block = list.slice(0, index).filter(own).map((entry) => parseBlock(entry.body)).findLast((entry) => entry !== null);
-    if (!block || !RETIRED_BLOCK_REASONS.has(block.reason)) return;
+    // A retired reason, or a review hand-off (SPEC-review-rounds §5a): the
+    // answer is the decision.
+    if (!block || (!RETIRED_BLOCK_REASONS.has(block.reason) && block.reviewFingerprint === undefined)) return;
     const answer = list.slice(0, index).findLast((entry) => entry?.author?.login === resumed.by && ANSWER_RE.test(String(entry?.body ?? '')));
     decisions.push({ kind: 'answer', question: block.question, choice: resumed.answer, alternatives: [], why: `@${resumed.by} answered the ${block.reason} block`,
       at: resumed.at, url: answer?.url ?? comment.url ?? null, by: resumed.by, answer: null });
@@ -580,11 +604,13 @@ export function parseBlock(body) {
     && text(parsed.question) && !parsed.question.includes('\n') && Number.isFinite(Date.parse(parsed.at)));
 }
 
-export function markBlocked({ issue, reason, question, gate = 'human:decide', note = '', run, now = Date.now() }) {
+export function markBlocked({ issue, reason, question, gate = 'human:decide', note = '', reviewFingerprint = null, reviewRound = null, run, now = Date.now() }) {
   if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
   if (!REASON_RE.test(reason ?? '')) return refusal('INVALID_ARGS', '--reason: expected an UPPER_SNAKE reason code');
   if (!text(question) || question.includes('\n')) return refusal('INVALID_ARGS', '--question: expected one non-empty line');
   if (!BLOCK_GATES.includes(gate)) return refusal('INVALID_ARGS', `--gate: expected one of ${BLOCK_GATES.join(', ')}`);
+  const binding = reviewBinding(reviewFingerprint, reviewRound);
+  if (binding === null) return refusal('INVALID_ARGS', '--review-fingerprint <sha256> and --review-round <N> go together');
   if (RETIRED_BLOCK_REASONS.has(reason)) {
     return refusal('BLOCK_REASON_RETIRED',
       `--reason ${reason} is retired: a contradiction, a missing value, a design or scope choice is decided with --decide --question --choice --why --alternatives. Block only for ${[...HUMAN_BLOCK_REASONS].join(' or ')}.`);
@@ -597,7 +623,7 @@ export function markBlocked({ issue, reason, question, gate = 'human:decide', no
   if (facts?.state !== 'OPEN') return refusal('ISSUE_NOT_OPEN', `#${issue} is not an open issue`);
   // Resolved before the label edit: the edit is the call a caller checks last.
   const commonDir = commonDirOf(run);
-  const block = { issue, class: 'human', reason, question: text(question), at: new Date(now).toISOString() };
+  const block = { issue, class: 'human', reason, question: text(question), at: new Date(now).toISOString(), ...binding };
   const body = [
     blockMarker(block),
     `**autoloop: blocked — needs a human authorization** (\`${reason}\`)`,
@@ -644,8 +670,12 @@ function lastLine(stdout) {
   return String(stdout).split('\n').filter(Boolean).at(-1) ?? '';
 }
 
-function writePermission(run, login) {
-  const answer = run('gh', ['api', `repos/{owner}/{repo}/collaborators/${encodeURIComponent(login)}/permission`, '--jq', '.permission']);
+// `repository` ({host, owner, repo}) names the target; without it gh reads the
+// checkout's own.
+function writePermission(run, login, repository = null) {
+  const host = repository === null ? [] : ['--hostname', repository.host];
+  const repo = repository === null ? '{owner}/{repo}' : `${repository.owner}/${repository.repo}`;
+  const answer = run('gh', ['api', ...host, `repos/${repo}/collaborators/${encodeURIComponent(login)}/permission`, '--jq', '.permission']);
   return answer.ok && WRITE_PERMISSIONS.includes(answer.stdout);
 }
 
@@ -786,6 +816,106 @@ export function answerAfter(block, comments, trusted) {
   return newest;
 }
 
+function answerText(comment) {
+  return (ANSWER_RE.exec(String(comment?.body ?? ''))?.[1] ?? '').replace(ANSWERED_MARKER_RE, '').trim();
+}
+
+/** Pure: what reopens a unit after the review hand-off whose evidence is
+ *  `fingerprint` (SPEC-review-rounds §5a), or null. The loop's newest marker
+ *  on that hand-off decides alone: a block whose newest trusted `/answer` is
+ *  `rework…`, or a `rework…` decision whose newest trusted `/answer`, if any,
+ *  is `rework…` too. An answer belongs to the loop's newest block before it. */
+export function reworkGrant({ issue, fingerprint, comments, trusted }) {
+  const list = Array.isArray(comments) ? comments : [];
+  const own = (comment) => comment?.viewerDidAuthor === true;
+  const answersTo = (index) => {
+    const rest = list.slice(index + 1);
+    const next = rest.findIndex((comment) => own(comment) && parseBlock(comment.body) !== null);
+    // GitHub lists comments in the order they were posted.
+    return (next === -1 ? rest : rest.slice(0, next)).filter((comment) => {
+      const match = ANSWER_RE.exec(String(comment?.body ?? ''));
+      const by = comment?.author?.login;
+      return match !== null && typeof by === 'string' && trusted(by)
+        && (!own(comment) || ANSWERED_MARKER_RE.test(match[1] ?? ''));
+    });
+  };
+  const bound = (marker) => marker?.issue === issue && marker.reviewFingerprint === fingerprint && positive(marker.reviewRound) !== null;
+  const grant = (kind, comment, marker) => ({ kind, issue, comment: comment.url, round: positive(marker.reviewRound), evidenceFingerprint: fingerprint });
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const comment = list[index];
+    if (!own(comment)) continue;
+    const block = parseBlock(comment.body);
+    if (bound(block)) {
+      const newest = answersTo(index).at(-1);
+      return newest !== undefined && REWORK_RE.test(answerText(newest)) ? grant('answer', newest, block) : null;
+    }
+    const decision = parseDecision(comment.body);
+    if (bound(decision)) {
+      const newest = answersTo(index).at(-1);
+      return REWORK_RE.test(decision.choice) && (newest === undefined || REWORK_RE.test(answerText(newest)))
+        ? grant('decision', comment, decision) : null;
+    }
+  }
+  return null;
+}
+
+function trustCache(run, repository = null) {
+  const permissions = {};
+  return (login) => {
+    if (!(login in permissions)) permissions[login] = writePermission(run, login, repository);
+    return permissions[login];
+  };
+}
+
+function issueComments(run, issue, repository = null) {
+  const target = repository === null ? [] : ['--repo', `${repository.host}/${repository.owner}/${repository.repo}`];
+  const viewed = run('gh', ['issue', 'view', String(issue), ...target, '--json', 'comments']);
+  if (!viewed.ok) return null;
+  try {
+    const comments = JSON.parse(viewed.stdout).comments;
+    return Array.isArray(comments) ? comments : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The rework a hand-off took, for `review-contract.mjs --rework-authorization-file`. */
+export function reworkAuthorization({ issue, fingerprint, run }) {
+  if (!positive(issue)) return refusal('INVALID_ARGS', '--issue: expected a positive issue number');
+  if (!FINGERPRINT_RE.test(fingerprint ?? '')) return refusal('INVALID_ARGS', '--review-fingerprint: expected the hand-off\'s reviewEvidenceFingerprint');
+  const comments = issueComments(run, issue);
+  if (comments === null) return refusal('GH_FAILED', `the comments of #${issue} are unreadable`);
+  const grant = reworkGrant({ issue, fingerprint, comments, trusted: trustCache(run) });
+  return grant === null
+    ? refusal('NO_REWORK_AUTHORIZATION', `#${issue} has no trusted /answer rework and no standing rework decision on that hand-off`)
+    : { ok: true, grant };
+}
+
+/** Every rework in review evidence, derived again from GitHub before the
+ *  review status is posted: the same comment, kind and round still stand, on
+ *  an issue of `repository` — the validated publication target, never the
+ *  ambient GH_REPO or remote. */
+export function verifyReworkAuthorizations({ grants, repository, run }) {
+  const trusted = trustCache(run, repository);
+  // Owner and repo compare in any letter case: the remote parse lowercases them,
+  // GitHub's links keep theirs. A repository renamed behind a redirect fails.
+  const target = `${repository.host}/${repository.owner}/${repository.repo}`.toLowerCase();
+  const onIssue = (url, issue) => {
+    const match = /^https:\/\/([^/]+\/[^/]+\/[^/]+)\/issues\/(\d+)#issuecomment-\d+$/u.exec(url);
+    return match !== null && match[1].toLowerCase() === target && Number(match[2]) === issue;
+  };
+  for (const grant of grants ?? []) {
+    const comments = issueComments(run, grant.issue, repository);
+    if (comments === null) return refusal('GH_FAILED', `the comments of #${grant.issue} are unreadable`);
+    const found = reworkGrant({ issue: grant.issue, fingerprint: grant.evidenceFingerprint, comments, trusted });
+    if (found === null || found.kind !== grant.kind || found.comment !== grant.comment || found.round !== grant.round
+      || !onIssue(grant.comment, grant.issue)) {
+      return refusal('REWORK_UNVERIFIED', `the ${grant.kind} ${grant.comment} no longer reopens #${grant.issue} on GitHub`);
+    }
+  }
+  return { ok: true };
+}
+
 /** Resume every loop block a trusted human has answered with `/answer`.
  *  Never throws: anything unreadable leaves the unit blocked, the safe side. A
  *  block counts only when its marker was posted within five minutes before the
@@ -800,11 +930,7 @@ export function triageBlocks({ run, now = Date.now() }) {
   const waiting = [];
   const held = [];
   const errors = [];
-  const permissions = {};
-  const trusted = (login) => {
-    if (!(login in permissions)) permissions[login] = writePermission(run, login);
-    return permissions[login];
-  };
+  const trusted = trustCache(run);
   for (const issue of issues) {
     // Only a marker the loop itself posted, for this issue, counts; its instant
     // is GitHub's createdAt, never the runner's clock written into the marker.
@@ -979,11 +1105,11 @@ export function postDigest({ run, now = Date.now() }) {
 }
 
 export function parseArgs(args) {
-  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, onPr: null, paths: [], boundaryFile: null, snapshot: null, post: false, note: '', choice: null, why: null, alternatives: [], reason: null, question: null, gate: 'human:decide', parent: null, title: null, bodyFile: null, blocksParent: false, out: null, error: null };
+  const parsed = { mode: null, issue: null, pr: null, commit: null, onIssue: null, onBaseRed: false, minutes: null, onPr: null, paths: [], boundaryFile: null, snapshot: null, post: false, note: '', choice: null, why: null, alternatives: [], reason: null, question: null, gate: 'human:decide', parent: null, title: null, bodyFile: null, blocksParent: false, out: null, reviewFingerprint: null, reviewRound: null, error: null };
   const value = (index) => args[index + 1];
   for (let index = 0; index < args.length; index += 1) {
     const flag = args[index];
-    if (['--obsolete', '--wait', '--block', '--repair', '--decide', '--decisions', '--lift', '--digest', '--overlap', '--self-test'].includes(flag)) {
+    if (['--obsolete', '--wait', '--block', '--repair', '--decide', '--decisions', '--rework-authorization', '--lift', '--digest', '--overlap', '--self-test'].includes(flag)) {
       if (parsed.mode !== null) return { ...parsed, error: 'expected one mode' };
       parsed.mode = flag.slice(2);
     } else if (flag === '--on-base-red') {
@@ -992,14 +1118,14 @@ export function parseArgs(args) {
       parsed.post = true;
     } else if (flag === '--blocks-parent') {
       parsed.blocksParent = true;
-    } else if (['--issue', '--pr', '--on-issue', '--minutes', '--parent', '--on-pr'].includes(flag)) {
+    } else if (['--issue', '--pr', '--on-issue', '--minutes', '--parent', '--on-pr', '--review-round'].includes(flag)) {
       const number = positive(value(index));
       if (number === null) return { ...parsed, error: `${flag}: expected a positive number` };
-      parsed[{ '--issue': 'issue', '--pr': 'pr', '--on-issue': 'onIssue', '--minutes': 'minutes', '--parent': 'parent', '--on-pr': 'onPr' }[flag]] = number;
+      parsed[{ '--issue': 'issue', '--pr': 'pr', '--on-issue': 'onIssue', '--minutes': 'minutes', '--parent': 'parent', '--on-pr': 'onPr', '--review-round': 'reviewRound' }[flag]] = number;
       index += 1;
-    } else if (['--commit', '--note', '--choice', '--why', '--reason', '--question', '--gate', '--title', '--body-file', '--out', '--boundary-file', '--snapshot'].includes(flag)) {
+    } else if (['--commit', '--note', '--choice', '--why', '--reason', '--question', '--gate', '--title', '--body-file', '--out', '--boundary-file', '--snapshot', '--review-fingerprint'].includes(flag)) {
       if (value(index) === undefined) return { ...parsed, error: `${flag}: expected a value` };
-      parsed[{ '--body-file': 'bodyFile', '--boundary-file': 'boundaryFile' }[flag] ?? flag.slice(2)] = value(index);
+      parsed[{ '--body-file': 'bodyFile', '--boundary-file': 'boundaryFile', '--review-fingerprint': 'reviewFingerprint' }[flag] ?? flag.slice(2)] = value(index);
       index += 1;
     } else if (flag === '--alternatives' || flag === '--paths') {
       if (value(index) === undefined) return { ...parsed, error: `${flag}: expected a value` };
@@ -1009,7 +1135,8 @@ export function parseArgs(args) {
       return { ...parsed, error: `unknown argument ${flag}` };
     }
   }
-  if (parsed.mode === null) return { ...parsed, error: 'expected --obsolete, --wait, --block, --repair, --decide, --decisions, --lift, --digest, --overlap or --self-test' };
+  if (parsed.mode === null) return { ...parsed, error: 'expected --obsolete, --wait, --block, --repair, --decide, --decisions, --rework-authorization, --lift, --digest, --overlap or --self-test' };
+  if (parsed.mode === 'rework-authorization' && !parsed.out) return { ...parsed, error: '--rework-authorization writes its rework to --out <path>' };
   return parsed;
 }
 
@@ -1683,6 +1810,108 @@ function selfTest() {
       body: `/answer 64\n\n${answeredMarker('0000000000003-answer-1-abc.json')}`, createdAt: later(1) }], trustedOnly).text === '64'
     && answerAfter(marked, [{ author: { login: 'owner' }, body: `/answer 64\n${answeredMarker('x')}`, createdAt: later(1) }], trustedOnly).text === '64');
 
+  // SPEC-review-rounds §5a: what reopens a unit after the review hand-off.
+  const handoffFp = 'c'.repeat(64);
+  const handoffBlock = blockMarker({ ...marked, reason: 'POLICY_DENIED', reviewFingerprint: handoffFp, reviewRound: 5 });
+  const reworkDecision = (choice) => decisionMarker({ issue: 7, question: 'Rework the open findings?', choice, alternatives: ['accept'],
+    why: 'one Major', at: blockAt, reviewFingerprint: handoffFp, reviewRound: 5 });
+  const own = (body, minutes, url) => ({ author: { login: 'loop' }, viewerDidAuthor: true, body, createdAt: later(minutes), url });
+  const by = (login, body, minutes, url) => ({ author: { login }, body, createdAt: later(minutes), url });
+  const link = (n) => `https://github.com/acme/widgets/issues/7#issuecomment-${n}`;
+  const grantOf = (comments) => reworkGrant({ issue: 7, fingerprint: handoffFp, comments, trusted: trustedOnly });
+  const answeredRework = [own(handoffBlock, 0, link(1)), by('owner', '/answer rework the parser', 5, link(2))];
+  check('a trusted /answer rework to the hand-off block is the rework, bound to its round and evidence',
+    JSON.stringify(grantOf(answeredRework))
+      === JSON.stringify({ kind: 'answer', issue: 7, comment: link(2), round: 5, evidenceFingerprint: handoffFp }));
+  check('no rework stands from a stranger, the loop, an answer before the block, a newer answer, another hand-off or a forged block',
+    grantOf([own(handoffBlock, 0, link(1)), by('stranger', '/answer rework', 5, link(2))]) === null
+    && grantOf([own(handoffBlock, 0, link(1)), { ...by('owner', '/answer rework', 5, link(2)), viewerDidAuthor: true }]) === null
+    && grantOf([by('owner', '/answer rework', -5, link(2)), own(handoffBlock, 0, link(1))]) === null
+    && grantOf([...answeredRework, by('owner', '/answer accept as is', 6, link(3))]) === null
+    && grantOf([own(blockMarker({ ...marked, reviewFingerprint: 'd'.repeat(64), reviewRound: 5 }), 0, link(1)),
+      by('owner', '/answer rework', 5, link(2))]) === null
+    && grantOf([by('owner', handoffBlock, 0, link(1)), by('owner', '/answer rework', 5, link(2))]) === null);
+  check('the loop\'s rework decision on the hand-off stands until a trusted /answer reverses it; a later hand-off block does not',
+    JSON.stringify(grantOf([own(reworkDecision('rework once'), 0, link(4))]))
+      === JSON.stringify({ kind: 'decision', issue: 7, comment: link(4), round: 5, evidenceFingerprint: handoffFp })
+    && grantOf([own(reworkDecision('rework once'), 0, link(4)), by('owner', '/answer accept the findings', 5, link(5))]) === null
+    && grantOf([own(reworkDecision('accept the findings'), 0, link(4))]) === null
+    && grantOf([own(reworkDecision('rework once'), 0, link(4)),
+      own(blockMarker({ ...marked, reviewFingerprint: 'd'.repeat(64), reviewRound: 7 }), 10, link(6)),
+      by('owner', '/answer rework', 15, link(7))])?.comment === link(4)
+    && grantOf([own(reworkDecision('rework once'), 0, link(4)),
+      own(blockMarker({ ...marked, reviewFingerprint: 'd'.repeat(64), reviewRound: 7 }), 10, link(6)),
+      by('owner', '/answer drop it', 15, link(7))])?.comment === link(4)
+    && grantOf([own(reworkDecision('rework once'), 0, link(4)),
+      by('stranger', blockMarker({ ...marked, reviewFingerprint: 'd'.repeat(64), reviewRound: 7 }), 10, link(6)),
+      by('owner', '/answer drop it', 15, link(7))]) === null);
+  check('the newest marker on the hand-off decides alone: an older block or decision never stands behind its no',
+    grantOf([own(reworkDecision('rework once'), 0, link(4)), own(handoffBlock, 5, link(1)),
+      by('owner', '/answer accept as is', 10, link(2))]) === null
+    && grantOf([...answeredRework, own(reworkDecision('accept the findings'), 10, link(4))]) === null);
+  check('an /answer rework confirms the loop\'s rework decision; the newest answer decides, as on a block',
+    grantOf([own(reworkDecision('rework once'), 0, link(4)), by('owner', '/answer rework', 5, link(5))])?.comment === link(4)
+    && grantOf([own(reworkDecision('rework once'), 0, link(4)), by('owner', '/answer drop it', 5, link(5)),
+      by('owner', '/answer rework after all', 8, link(6))])?.comment === link(4)
+    && grantOf([own(reworkDecision('rework once'), 0, link(4)), by('owner', '/answer rework', 5, link(5)),
+      by('owner', '/answer drop it', 8, link(6))]) === null);
+  check('a marker of another issue grants nothing',
+    grantOf([own(blockMarker({ ...marked, issue: 8, reason: 'POLICY_DENIED', reviewFingerprint: handoffFp, reviewRound: 5 }), 0, link(1)),
+      by('owner', '/answer rework', 5, link(2))]) === null);
+  const resumedRework = `<!-- autoloop-resumed-v1 ${JSON.stringify({ issue: 7, by: 'owner', answer: 'rework the parser', at: later(6) })} -->`;
+  const listedRework = unitDecisions([...answeredRework, own(resumedRework, 6, link(3))]);
+  check('the unit\'s decisions list a human\'s answer to a review hand-off',
+    listedRework.length === 1 && listedRework[0].kind === 'answer' && listedRework[0].choice === 'rework the parser'
+      && listedRework[0].url === link(2));
+  const onGitHub = (comments) => fakeRun([
+    ['gh issue view 7 --json comments', JSON.stringify({ comments })],
+    ['gh api repos/{owner}/{repo}/collaborators/owner/permission', 'write'],
+  ]).run;
+  // The publication repository alone answers: an ambient read fails.
+  const onWidgets = (comments) => fakeRun([
+    ['gh issue view 7 --repo github.com/acme/widgets --json comments', JSON.stringify({ comments })],
+    ['gh api --hostname github.com repos/acme/widgets/collaborators/owner/permission', 'write'],
+  ]).run;
+  const answerGrant = { kind: 'answer', issue: 7, comment: link(2), round: 5, evidenceFingerprint: handoffFp };
+  const widgets = { host: 'github.com', owner: 'acme', repo: 'widgets' };
+  const verified = (grants, comments, repository = widgets) =>
+    verifyReworkAuthorizations({ grants, repository, run: comments === null ? fakeRun([]).run : onWidgets(comments) });
+  check('a published rework is derived again from GitHub: it stands, or publication is refused',
+    verified([answerGrant], answeredRework).ok === true
+    && verified([{ ...answerGrant, comment: link(9) }], answeredRework).code === 'REWORK_UNVERIFIED'
+    && verified([{ ...answerGrant, kind: 'decision' }], answeredRework).code === 'REWORK_UNVERIFIED'
+    && verified([{ ...answerGrant, round: 6 }], answeredRework).code === 'REWORK_UNVERIFIED'
+    && verified([answerGrant], [...answeredRework, by('owner', '/answer drop it', 9, link(3))]).code === 'REWORK_UNVERIFIED'
+    && verified([answerGrant], null).code === 'GH_FAILED');
+  // The remote parse lowercases owner and repo; GitHub's comment links keep their case.
+  const capitalized = (url) => url.replace('/acme/widgets/', '/Acme/Widgets/');
+  check('a rework comment on the publication repository matches it in any letter case',
+    verified([{ ...answerGrant, comment: capitalized(answerGrant.comment) }],
+      answeredRework.map((comment) => ({ ...comment, url: capitalized(comment.url) }))).ok === true
+    && verified([{ ...answerGrant, comment: answerGrant.comment.replace('/issues/7#', '/issues/8#') }],
+      answeredRework.map((comment) => ({ ...comment, url: comment.url.replace('/issues/7#', '/issues/8#') }))).code === 'REWORK_UNVERIFIED');
+  check('a published rework is read from the publication repository alone, and its comment is on that issue',
+    verified([answerGrant], answeredRework, { host: 'github.com', owner: 'acme', repo: 'gadgets' }).ok !== true
+    && verified([{ ...answerGrant, comment: answerGrant.comment.replace('/widgets/', '/gadgets/') }],
+      answeredRework.map((comment) => ({ ...comment, url: comment.url.replace('/widgets/', '/gadgets/') }))).code === 'REWORK_UNVERIFIED');
+  check('--rework-authorization writes the rework a hand-off took, or refuses without one',
+    JSON.stringify(reworkAuthorization({ issue: 7, fingerprint: handoffFp, run: onGitHub(answeredRework) }))
+      === JSON.stringify({ ok: true, grant: answerGrant })
+    && reworkAuthorization({ issue: 7, fingerprint: handoffFp, run: onGitHub([own(handoffBlock, 0, link(1))]) }).code === 'NO_REWORK_AUTHORIZATION'
+    && reworkAuthorization({ issue: 7, fingerprint: 'not a hash', run: onGitHub(answeredRework) }).code === 'INVALID_ARGS');
+  const reviewMarked = fakeRun([['gh issue view 7', '{"state":"OPEN","labels":[]}'], ['gh issue comment 7', ''], ['gh issue edit 7', '']]);
+  const reviewDecided = fakeRun([['gh issue view 7', 'OPEN'], ['gh issue comment 7', 'https://x/7#c1'], ['gh issue edit 7', '']]);
+  check('a block or decision on a review hand-off records its round and evidence; a half or malformed pair is refused',
+    markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'Accept, rework or drop?', reviewFingerprint: handoffFp, reviewRound: 5, run: reviewMarked.run }).ok
+    && parseBlock(reviewMarked.calls.find((line) => line.startsWith('gh issue comment 7'))).reviewFingerprint === handoffFp
+    && markDecided({ issue: 7, question: 'Rework?', choice: 'rework once', why: 'w', reviewFingerprint: handoffFp, reviewRound: 5, run: reviewDecided.run }).ok
+    && parseDecision(reviewDecided.calls.find((line) => line.startsWith('gh issue comment 7'))).reviewRound === 5
+    && markBlocked({ issue: 7, reason: 'POLICY_DENIED', question: 'q?', reviewFingerprint: handoffFp, run: reviewMarked.run }).code === 'INVALID_ARGS'
+    && markDecided({ issue: 7, question: 'q?', choice: 'c', why: 'w', reviewFingerprint: 'zz', reviewRound: 5, run: reviewDecided.run }).code === 'INVALID_ARGS'
+    && parseArgs(['--rework-authorization', '--issue', '7', '--review-fingerprint', handoffFp, '--out', 'g.json']).mode === 'rework-authorization'
+    && /--out/u.test(parseArgs(['--rework-authorization', '--issue', '7', '--review-fingerprint', handoffFp]).error ?? '')
+    && parseArgs(['--block', '--issue', '7', '--review-round', '5']).reviewRound === 5);
+
   const blockedList = JSON.stringify([
     { number: 7, title: 'Answered', labels: [{ name: 'loop-ready' }, { name: 'loop-blocked' }, { name: 'human:decide' }],
       comments: [{ author: { login: 'owner' }, viewerDidAuthor: true, body: blockMarker(marked), createdAt: blockAt },
@@ -1841,7 +2070,7 @@ function main() {
   const parsed = parseArgs(process.argv.slice(2));
   if (parsed.error) {
     console.error(`unit: ${parsed.error}`);
-    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720 | --on-pr M --paths A,B/) [--note T] | --overlap --issue N --boundary-file PATH --snapshot PATH | --repair --parent N --title T --body-file PATH [--blocks-parent] | --block --issue N --reason CODE --question T [--gate human:authorize] [--note T] | --decide --issue N --question T --choice T --why T [--alternatives "A; B"] | --decisions --issue N [--out PATH] | --lift | --digest [--post] | --self-test');
+    console.error('usage: unit.mjs --obsolete --issue N (--pr M | --commit SHA) [--note T] | --wait --issue N (--on-issue M | --on-base-red | --minutes 1..720 | --on-pr M --paths A,B/) [--note T] | --overlap --issue N --boundary-file PATH --snapshot PATH | --repair --parent N --title T --body-file PATH [--blocks-parent] | --block --issue N --reason CODE --question T [--gate human:authorize] [--note T] [--review-fingerprint H --review-round R] | --decide --issue N --question T --choice T --why T [--alternatives "A; B"] [--review-fingerprint H --review-round R] | --decisions --issue N [--out PATH] | --rework-authorization --issue N --review-fingerprint H --out PATH | --lift | --digest [--post] | --self-test');
     console.error(`human block reasons: ${[...HUMAN_BLOCK_REASONS].join(', ')}; retired (use --decide): ${[...RETIRED_BLOCK_REASONS].join(', ')}`);
     process.exit(2);
   }
@@ -1867,6 +2096,19 @@ function main() {
   }
   if (parsed.mode === 'decide' || parsed.mode === 'block') {
     const outcome = parsed.mode === 'decide' ? markDecided({ ...parsed, run }) : markBlocked({ ...parsed, run });
+    console.log(JSON.stringify(outcome, null, 1));
+    process.exit(outcome.ok ? 0 : 1);
+  }
+  if (parsed.mode === 'rework-authorization') {
+    const outcome = reworkAuthorization({ issue: parsed.issue, fingerprint: parsed.reviewFingerprint, run });
+    if (outcome.ok) {
+      try {
+        writeFileSync(parsed.out, `${JSON.stringify(outcome.grant)}\n`);
+      } catch (error) {
+        console.log(JSON.stringify(refusal('INVALID_ARGS', `--out: ${error.message}`)));
+        process.exit(1);
+      }
+    }
     console.log(JSON.stringify(outcome, null, 1));
     process.exit(outcome.ok ? 0 : 1);
   }

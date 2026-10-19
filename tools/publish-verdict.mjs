@@ -59,7 +59,7 @@ import {
   validateAttestation,
 } from './attestation-contract.mjs';
 import { parseLoopClaim } from './claim-contract.mjs';
-import { parseRepair } from './unit.mjs';
+import { parseRepair, realRun, verifyReworkAuthorizations } from './unit.mjs';
 import {
   NO_CONFIG,
   resolveProjectConfig,
@@ -200,17 +200,33 @@ function readBoundedNoFollow(path, maximum) {
   }
 }
 
+// Each rework that reopened the unit after the re-plan hand-off is derived
+// again from the issue's comments (SPEC-review-rounds §5a): the evidence
+// alone cannot prove a human answered or the loop's decision still stands.
+// `repository` is the validated publication target.
+export function reworkVerifier(run, repository) {
+  return (grants) => verifyReworkAuthorizations({ grants, repository, run });
+}
+
 function reviewSummary(
   evidence,
   sha,
   liveCheckout,
   authorizer = authorizeReviewPublication,
+  verifyReworks = null,
 ) {
   const authorization = authorizer(evidence, sha, liveCheckout);
   if (!authorization.authorized) {
     throw new Error(
       `review evidence is not clean and live-checkout-bound (${authorization.code})`,
     );
+  }
+  const reworks = authorization.reworkAuthorizations ?? [];
+  if (reworks.length > 0) {
+    const verified = verifyReworks?.(reworks) ?? { code: 'REWORK_UNVERIFIED', message: 'no verifier for the publication repository' };
+    if (verified.ok !== true) {
+      throw new Error(`a rework in the review evidence is not on GitHub (${verified.code}: ${verified.message})`);
+    }
   }
   return (
     `Authenticated review convergence: ${authorization.code}; `
@@ -2037,6 +2053,8 @@ export function finalizeTerminalDelivery(input, context = {}) {
     input.reviewEvidence,
     input.record.headOid,
     snapshot.checkout,
+    adapters.authorizeReview ?? authorizeReviewPublication,
+    adapters.verifyReworks ?? reworkVerifier(adapters.run ?? realRun(snapshot.checkout.root), snapshot.repository),
   );
   if (reviewReceiptFingerprint(review) !== input.record.run.receiptFingerprint) {
     throw new Error('review receipt does not match the terminal record');
@@ -3196,6 +3214,64 @@ function selfTest() {
   } catch {
     passed += 1;
   }
+  // SPEC-review-rounds §5a: a rework in the evidence is derived again from
+  // GitHub before the status is posted; a forged or reversed one posts nothing.
+  const reworkGrantFixture = {
+    kind: 'answer', issue: 7, comment: 'https://github.com/acme/widgets/issues/7#issuecomment-2',
+    round: 5, evidenceFingerprint: 'd'.repeat(64),
+  };
+  const reworkAuthorizer = (grants) => () => ({
+    authorized: true, code: 'REVIEW_CLEAN', reviewEvidenceFingerprint: 'c'.repeat(64), reworkAuthorizations: grants,
+  });
+  const reworkComments = (answerBy, viewerDidAuthor = false, extra = []) => [
+    { author: { login: 'loop' }, viewerDidAuthor: true, createdAt: '2026-10-15T10:00:00Z', url: 'https://github.com/acme/widgets/issues/7#issuecomment-1',
+      body: `<!-- autoloop-block-v1 ${JSON.stringify({ issue: 7, class: 'human', reason: 'POLICY_DENIED', question: 'Accept, rework or drop?',
+        at: '2026-10-15T10:00:00Z', reviewFingerprint: 'd'.repeat(64), reviewRound: 5 })} -->` },
+    { author: { login: answerBy }, viewerDidAuthor, createdAt: '2026-10-15T11:00:00Z', url: reworkGrantFixture.comment, body: '/answer rework' },
+    ...extra,
+  ];
+  // GitHub answers only for the publication repository, named explicitly:
+  // never the ambient GH_REPO or remote.
+  const fakeGitHub = (comments) => (command, args) => {
+    const line = [command, ...args].join(' ');
+    if (line.startsWith('gh issue view 7 --repo github.com/acme/widgets --json comments')) return { ok: true, stdout: JSON.stringify({ comments }), stderr: '' };
+    if (line.startsWith('gh api --hostname github.com repos/acme/widgets/collaborators/owner/permission')) return { ok: true, stdout: 'write', stderr: '' };
+    return { ok: false, stdout: '', stderr: 'unexpected' };
+  };
+  const widgets = { host: 'github.com', owner: 'acme', repo: 'widgets' };
+  const publishesWith = (grants, comments, repository = widgets) => {
+    try {
+      return reviewSummary({ round: 7 }, reviewCheckout.headOid, reviewCheckout, reworkAuthorizer(grants),
+        reworkVerifier(fakeGitHub(comments), repository)).includes('round 7');
+    } catch {
+      return false;
+    }
+  };
+  if (
+    publishesWith([reworkGrantFixture], reworkComments('owner'))
+    && publishesWith([], [])
+    && !publishesWith([reworkGrantFixture], reworkComments('stranger'))
+    && !publishesWith([reworkGrantFixture], reworkComments('loop', true))
+    && !publishesWith([{ ...reworkGrantFixture, evidenceFingerprint: 'e'.repeat(64) }], reworkComments('owner'))
+    && !publishesWith([reworkGrantFixture], reworkComments('owner', false, [{ author: { login: 'owner' }, createdAt: '2026-10-15T12:00:00Z',
+      url: 'https://github.com/acme/widgets/issues/7#issuecomment-3', body: '/answer drop it' }]))
+    && !publishesWith([reworkGrantFixture], reworkComments('owner'), { host: 'github.com', owner: 'acme', repo: 'gadgets' })
+    && (() => {
+      try {
+        reviewSummary({ round: 7 }, reviewCheckout.headOid, reviewCheckout, reworkAuthorizer([reworkGrantFixture]));
+        return false;
+      } catch {
+        return true;
+      }
+    })()
+    && !publishesWith([{ ...reworkGrantFixture, comment: 'https://github.com/acme/gadgets/issues/7#issuecomment-2' }],
+      reworkComments('owner').map((comment) => (comment.url === reworkGrantFixture.comment
+        ? { ...comment, url: 'https://github.com/acme/gadgets/issues/7#issuecomment-2' } : comment)))
+  ) {
+    passed += 1;
+  } else {
+    console.error('FAIL review publication derives each rework again from GitHub and posts nothing for a forged or reversed one');
+  }
   const originalGhRepo = process.env.GH_REPO;
   try {
     process.env.GH_REPO = 'attacker/redirect';
@@ -3713,6 +3789,39 @@ function selfTest() {
   } else {
     console.error('FAIL draft manual delivery reaches one read-back terminal finalizer');
   }
+  // SPEC-review-rounds §5a: the finalizer derives each rework again from
+  // GitHub as the review publisher does; a reworked unit finalizes, a reversed
+  // rework does not.
+  // `run` reaches the default verifier, which reads the snapshot's repository.
+  const reworkedTerminal = (comments, injected = true) => {
+    try {
+      return finalizeTerminalDelivery(structuredClone(terminalInput), {
+        repositoryRoot: '/repo',
+        adapters: {
+          ...terminalAdapters,
+          review: undefined,
+          authorizeReview: () => ({
+            authorized: true, code: 'REVIEW_CLEAN', reviewEvidenceFingerprint: '2'.repeat(64), reworkAuthorizations: [reworkGrantFixture],
+          }),
+          ...(injected
+            ? { verifyReworks: reworkVerifier(fakeGitHub(comments), widgets) }
+            : { run: fakeGitHub(comments), snapshot: () => ({ ...structuredClone(gateSnapshot), repository: widgets }) }),
+        },
+      }).ready === true;
+    } catch {
+      return false;
+    }
+  };
+  if (
+    reworkedTerminal(reworkComments('owner'))
+    && reworkedTerminal(reworkComments('owner'), false)
+    && !reworkedTerminal(reworkComments('owner', false, [{ author: { login: 'owner' }, createdAt: '2026-10-15T12:00:00Z',
+      url: 'https://github.com/acme/widgets/issues/7#issuecomment-3', body: '/answer drop it' }]))
+  ) {
+    passed += 1;
+  } else {
+    console.error('FAIL the terminal finalizer derives each rework again from GitHub');
+  }
   let racedHead = premerge.headOid;
   let racedDraft = true;
   let racedDelivered = false;
@@ -4225,7 +4334,7 @@ function selfTest() {
   } else {
     console.error(`FAIL a config.json repository publishes from it: ${JSON.stringify(jsonState)}`);
   }
-  const total = cases.length + 57;
+  const total = cases.length + 59;
   console.log(passed === total ? `self-test OK (${passed} cases)` : `self-test FAILED (${passed}/${total})`);
   return passed === total;
 }
@@ -4368,6 +4477,8 @@ function main() {
         evidence,
         parsed.sha,
         publicationSnapshot.checkout,
+        authorizeReviewPublication,
+        reworkVerifier(realRun(publicationSnapshot.checkout.root), publicationSnapshot.repository),
       );
     } else {
       throw new Error('publication evidence mode is missing');

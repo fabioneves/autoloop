@@ -18,7 +18,7 @@ export type StatusUnit = {
   needsYou: { kind: 'block' | 'decide' | 'authorize'; text: string } | null
 }
 
-export type StatusRound = { kind: 'full' | 'fix' | 're-plan' | 'open-findings'; n?: number; budget?: number }
+export type StatusRound = { kind: 'full' | 'fix' | 're-plan' | 'open-findings' | 'rework'; n?: number; budget?: number }
 
 export type StatusWait = { kind: 'issue' | 'pr' | 'base' | 'time'; number: number | null; paths: string[] | null; until: string | null }
 

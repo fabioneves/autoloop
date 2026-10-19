@@ -2202,6 +2202,25 @@ export const INCIDENTS = Object.freeze([
       Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**Never make a checkout\n  under `/tmp`**' }),
     ]),
   }),
+  Object.freeze({
+    id: 'a-rework-answer-after-the-re-plan-had-no-transition',
+    date: '2026-10-15',
+    symptom: 'LFE #519 (PR 627) was handed off after the re-plan round with an open Major; a human '
+      + 'answered "rework", and every later fix round was REVIEW_REPLAN_SPENT, in the contract, the '
+      + 'publisher and the finalizer alike.',
+    cause: 'The review contract admitted nothing after the re-plan hand-off: no authorization a '
+      + 'human answer or a loop decision could carry into the ledger, and no check of one on GitHub.',
+    enforcedBy: Object.freeze([
+      Object.freeze({ file: 'review-contract.mjs', anchor: "'an authorized rework after the hand-off admits one fix round'" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "'a rework bound to other evidence than the hand-off round is refused'" }),
+      Object.freeze({ file: 'review-contract.mjs', anchor: "'the builder admits an authorized rework after the hand-off and carries it to the closing round'" }),
+      Object.freeze({ file: 'unit.mjs', anchor: "'a published rework is derived again from GitHub: it stands, or publication is refused'" }),
+      Object.freeze({ file: 'publish-verdict.mjs', anchor: "'FAIL review publication derives each rework again from GitHub and posts nothing for a forged or reversed one'" }),
+      Object.freeze({ file: 'step.mjs', anchor: "'a rework round names itself, past the budget'" }),
+      Object.freeze({ file: '../docs/specs/SPEC-review-rounds.md', anchor: '**Rework after the hand-off.**' }),
+      Object.freeze({ file: '../skills/dev/SKILL.md', anchor: '**A rework reopens the hand-off**' }),
+    ]),
+  }),
 ]);
 
 export function auditIncidents(incidents = INCIDENTS, read = (file) =>

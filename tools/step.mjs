@@ -440,10 +440,11 @@ function minutes(ms) {
 
 // A review round, as `--round` names it (SPEC-review-rounds): `full` is
 // round 1 or a closing round, `fix-N` the Nth of three fix rounds, `re-plan`
-// the one re-plan round, `open-findings` the draft hand-off. The display
-// never counts rounds up to a cap.
+// the one re-plan round, `open-findings` the draft hand-off, `rework` the fix
+// round an authorized rework admits after it. The display never counts rounds
+// up to a cap.
 const FIX_ROUND_BUDGET = 3;
-const ROUND_RE = /^(?:full|fix-[1-3]|re-plan|open-findings)$/u;
+const ROUND_RE = /^(?:full|fix-[1-3]|re-plan|open-findings|rework)$/u;
 
 export function roundLabel(round) {
   if (typeof round !== 'string' || !ROUND_RE.test(round)) return null;
@@ -1129,6 +1130,10 @@ function selfTest() {
       const budget = Number(printed.stdout);
       return budget === FIX_ROUND_BUDGET && ROUND_RE.test(`fix-${budget}`) && !ROUND_RE.test(`fix-${budget + 1}`);
     }) === true],
+    // SPEC-review-rounds §5a: the fix round an authorized rework admits.
+    ['a rework round names itself, past the budget',
+      ribbon({ atMs: at(10, 2), issue: 350, step: '08-fix', round: 'rework', model: 'claude-opus-5-5' }).slice(29, 46) === '▰▰▰ rework       '
+        && parseArgs(['--issue', '350', '--to', '08-fix', '--round', 'rework']).error === null],
     ['a fix round has its own glyph', ribbon({ atMs: at(10, 19), issue: 350, step: '08-fix', round: 'fix-2', badge: '🚧', model: 'claude-opus-5-5', note: 'x' })
       .startsWith('10:19 #350 🚧 🔧 FIX          ▰▰▱ fix 2/3        🟠 OPUS 5.5')],
     ['a fallback is marked beside the model',
@@ -2722,7 +2727,7 @@ export function renderSetupPhase(phase, badge = '⏳') {
   return `${badge} ∞ ${cells} ${index + 1}/${SETUP_PHASES.length} ${name} ─ ${detail}`;
 }
 
-const USAGE = 'usage: step.mjs --issue <N> --to <step> [--round full|fix-<1..3>|re-plan|open-findings] [--model <id>] [--fallback] [--staged] '
+const USAGE = 'usage: step.mjs --issue <N> --to <step> [--round full|fix-<1..3>|re-plan|open-findings|rework] [--model <id>] [--fallback] [--staged] '
   + '[--badge <b>] [--note <text>]\n       step.mjs --issue <N> --resumed <what> [--result <dispatch-result.json>] [--ms <n>]\n'
   + '       step.mjs --setup <resolve|audit|interview|write|verify> [--badge ⏳|❌|⚠️]\n       step.mjs --self-test';
 
@@ -2761,7 +2766,7 @@ export function parseArgs(argv) {
   }
   out.issue = /^[1-9]\d{0,8}$/u.test(String(out.issue)) ? Number(out.issue) : null;
   if (out.issue === null) return { ...out, error: '--issue must be a positive issue number' };
-  if (out.round !== null && !ROUND_RE.test(out.round)) return { ...out, error: '--round must be full, fix-<1..3>, re-plan or open-findings' };
+  if (out.round !== null && !ROUND_RE.test(out.round)) return { ...out, error: '--round must be full, fix-<1..3>, re-plan, open-findings or rework' };
   if (out.ms !== null) {
     out.ms = Number(out.ms);
     if (!Number.isFinite(out.ms)) return { ...out, error: '--ms needs a number' };

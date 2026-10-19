@@ -345,7 +345,8 @@ too). Without it the unit is not resumable: report it awaiting re-authorization 
 `gh issue edit <N> --add-label loop-ready` for its human, and take other work.
 
 **A resume past the fix budget is decided, not claimed**: recorded rounds already spent it →
-take the `REVIEW_REPLAN` choice (step 8) without claiming.
+take the `REVIEW_REPLAN` choice (step 8) without claiming; a hand-off answered `rework` → the
+rework (step 8).
 
 **Blocking never strips `loop-ready`**; it removes `loop-started` and the `loop:*` step label only.
 **The unblock is equally one human action, and equally irreversible by the loop**: a trusted actor
@@ -552,7 +553,13 @@ ID. Fixes are dispatched (`WRITER_MADE_NO_CHANGE` refuses a fixer that did nothi
   full round. A Major: `defer` (seam) or `decide` in the closing round, else `REVIEW_OPEN_FINDINGS`:
   `step.mjs --to 08-code-review --round open-findings` (labels `human:decide`), a repair per
   `openFindings` entry under `## Open findings`, push, PR stays draft, `unit.mjs --block --reason
-  POLICY_DENIED --question "<accept, rework or drop?>"`; a Critical still open blocks the same way.
+  POLICY_DENIED --question "/answer rework | accept | drop?"`; a Critical still open blocks the same way.
+  Both pass the hand-off's `--review-fingerprint <reviewEvidenceFingerprint> --review-round <round>`.
+- **A rework reopens the hand-off** (an `/answer rework…`): `unit.mjs --rework-authorization
+  --issue <N> --review-fingerprint <fp> --out <scratchpad>/<N>-rework.json`, one fix round
+  (`step.mjs --round rework`, `--rework-authorization-file` on its append), then the closing
+  `--scope full` round. Still open: the hand-off again. `NO_REWORK_AUTHORIZATION`: the block
+  stands. A publish refused for a rework not on GitHub: the hand-off again.
 
 ### Carving out a predicate
 
@@ -807,7 +814,7 @@ Steps: `00-reconcile 01-premise 02-plan 03-plan-review 04-claim 05-implement 06-
 
 - `--model`: the result's `model`; omit for your own steps
   (`⚪ ORCHESTRATOR`). `--fallback` when it ran. Review/fix rounds pass `--round full|fix-<1..3>|
-  re-plan|open-findings` (a fix round is `08-fix`); plan review takes none.
+  re-plan|open-findings|rework` (a fix round is `08-fix`); plan review takes none.
 - Orphan reconciliation announces `00-reconcile` before any fetch or driver call. `⚠️ #N skipped
   <steps>` is expected only for 06; any other skip is a defect to fix first.
 - The dot is the model's colour (🟣 Fable, 🟠 Opus, 🟢 Astra, 🔵 Sonnet, 🟡 Haiku, ⚪ other).
