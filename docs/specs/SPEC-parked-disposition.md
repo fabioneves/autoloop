@@ -21,6 +21,7 @@ Use existing Node.js ESM status tools, validated snapshot/configuration data, an
 7. Treat merge readiness and execution as separate facts. Green checks do not prove a merge occurred or that every merge predicate passed. Do not trigger a merge from status rendering.
 8. Preserve checkout-reader protection. A reader whose process cwd is the primary checkout can block a checkout switch even if its prompt names immutable files. Report that scheduling wait accurately; do not grant an exemption based on prompt text.
 9. Keep existing legacy step records readable. Status reads must not modify live GitHub state, run ownership, pinned models, review evidence, or gate evidence.
+10. Prime closes the open `00-reconcile` step record of a closed issue's lifecycle marker as `refused`, with no card, when the driver refused its reconcile. Positive evidence is necessary: the latest step is `00-reconcile`, no delivery is pending, and the refusal is not older than the mark. A changed driver still retries the marker, which opens a new mark. A status read never closes a record (LFE, 2026-10-16: eight such marks stayed in every parked view).
 
 ## Commands
 

@@ -20,6 +20,8 @@ caught before the issue is queued.
    - If no such issue exists, `--post` creates it (creating the label too if missing) and pins it,
      ignoring a pin failure. The issue never gets `loop-ready`.
    - An empty digest still rewrites the body to "nothing waiting", so a stale list never survives.
+   - Decisions with `insteadOf` (the loop decided instead of a block, [Auto-decide](SPEC-auto-decide.md))
+     are listed under "Auto-decided instead of a block", apart from the other decisions.
 2. **`prime.mjs --close-run` and `--park`** post the digest themselves and add `digest: {rows,
    issue}` to their output. A digest failure is reported and never fails the close or the park.
 3. **SKILL:** the closing and park messages carry the digest rows. The close message's "lists every

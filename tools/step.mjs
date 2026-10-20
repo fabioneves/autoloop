@@ -306,6 +306,32 @@ export function closeUnit({ root, run = realRun(root), nowMs = Date.now(), issue
   }
 }
 
+// Prime's deferred schedule lists the markers of closed issues. When the
+// driver refused such a reconcile, the open reconcile mark of that attempt is
+// closed as refused, with no card. A mark newer than its refusal, other work
+// and a pending delivery stay open. A changed driver still retries the
+// marker, which opens a new mark.
+export function retireRefusedMarks({ dir, issues, refusals, nowMs = Date.now() }) {
+  const retired = [];
+  for (const issue of issues ?? []) {
+    const refusal = refusals?.[issue];
+    if (!Number.isFinite(refusal?.atMs)) continue;
+    try {
+      const outcome = updateStepRecord(join(dir, 'steps', `${issue}.json`), (record) => {
+        const last = record?.steps?.at(-1);
+        if (record?.issue !== issue || record.closed || record.pending || last?.step !== '00-reconcile'
+          || !(refusal.atMs >= last.startedAtMs)) return { changed: false };
+        record.closed = { outcome: 'refused', atMs: nowMs, code: refusal.code };
+        return { changed: true, record };
+      });
+      if (outcome.changed) retired.push(issue);
+    } catch {
+      // A record that cannot be updated stays visible; the next prime retries.
+    }
+  }
+  return retired;
+}
+
 export function transition({
   root, run = realRun(root), nowMs = Date.now(),
   issue, to, round = null, model = null, fallback = false, badge = '⏳', note = '', staged = false, pr = null,
@@ -414,10 +440,11 @@ function minutes(ms) {
 
 // A review round, as `--round` names it (SPEC-review-rounds): `full` is
 // round 1 or a closing round, `fix-N` the Nth of three fix rounds, `re-plan`
-// the one re-plan round, `open-findings` the draft hand-off. The display
-// never counts rounds up to a cap.
+// the one re-plan round, `open-findings` the draft hand-off, `rework` the fix
+// round an authorized rework admits after it. The display never counts rounds
+// up to a cap.
 const FIX_ROUND_BUDGET = 3;
-const ROUND_RE = /^(?:full|fix-[1-3]|re-plan|open-findings)$/u;
+const ROUND_RE = /^(?:full|fix-[1-3]|re-plan|open-findings|rework)$/u;
 
 export function roundLabel(round) {
   if (typeof round !== 'string' || !ROUND_RE.test(round)) return null;
@@ -1103,6 +1130,10 @@ function selfTest() {
       const budget = Number(printed.stdout);
       return budget === FIX_ROUND_BUDGET && ROUND_RE.test(`fix-${budget}`) && !ROUND_RE.test(`fix-${budget + 1}`);
     }) === true],
+    // SPEC-review-rounds §5a: the fix round an authorized rework admits.
+    ['a rework round names itself, past the budget',
+      ribbon({ atMs: at(10, 2), issue: 350, step: '08-fix', round: 'rework', model: 'claude-opus-5-5' }).slice(29, 46) === '▰▰▰ rework       '
+        && parseArgs(['--issue', '350', '--to', '08-fix', '--round', 'rework']).error === null],
     ['a fix round has its own glyph', ribbon({ atMs: at(10, 19), issue: 350, step: '08-fix', round: 'fix-2', badge: '🚧', model: 'claude-opus-5-5', note: 'x' })
       .startsWith('10:19 #350 🚧 🔧 FIX          ▰▰▱ fix 2/3        🟠 OPUS 5.5')],
     ['a fallback is marked beside the model',
@@ -1218,6 +1249,7 @@ function selfTest() {
   checks.push(...transitionChecks(at));
   checks.push(...dispositionChecks());
   checks.push(...pendingMergeChecks());
+  checks.push(...refusedMarkChecks());
   checks.push(...projectionChecks(at));
   const minute = 60_000;
   const start = at(9, 9);
@@ -2120,6 +2152,54 @@ function dispositionChecks() {
   return results;
 }
 
+// LFE, 2026-10-16: eight closed issues (#270…#314) stayed in every parked
+// view as "00 reconcile … (earlier run)". Prime skipped their markers as known
+// refused, but nothing closed the reconcile step the refused attempt opened.
+function refusedMarkChecks() {
+  const day = (hh, mm) => new Date(2026, 9, 12, hh, mm).getTime();
+  const nowMs = day(10, 30);
+  const base = mkdtempSync(join(tmpdir(), 'step-refused-'));
+  const dir = join(base, '.git', 'autoloop');
+  const stepsDir = join(dir, 'steps');
+  const run = (command, args) => (command === 'git' && args.includes('--git-common-dir')
+    ? { ok: true, stdout: join(base, '.git'), stderr: '' } : { ok: false, stdout: '', stderr: `unexpected ${command}` });
+  const markers = () => [{ marker: { version: 1, pids: [1], openedAtMs: day(9, 0) } }];
+  const reconcile = (atMs) => ({ step: '00-reconcile', startedAtMs: atMs });
+  const records = [
+    { issue: 270, steps: [reconcile(day(8, 0))] },
+    { issue: 271, steps: [reconcile(day(8, 50))] },
+    { issue: 272, steps: [{ step: '05-implement', startedAtMs: day(8, 0) }] },
+    { issue: 273, steps: [reconcile(day(8, 0))], pending: { outcome: 'delivered', pr: 9, policy: 'auto', reason: null, atMs: day(8, 0) } },
+    { issue: 274, steps: [reconcile(day(8, 0))] },
+  ];
+  const refusal = (atMs) => ({ code: 'PREMERGE_CI_COMPONENT_MISMATCH', atMs, driver: 'd' });
+  const refusals = { 270: refusal(day(8, 1)), 271: refusal(day(8, 1)), 272: refusal(day(8, 1)), 273: refusal(day(8, 1)) };
+  const issues = [270, 271, 272, 273, 274];
+  const results = [];
+  try {
+    mkdirSync(stepsDir, { recursive: true });
+    for (const record of records) writeFileSync(join(stepsDir, `${record.issue}.json`), JSON.stringify(record));
+    const retired = retireRefusedMarks({ dir, issues, refusals, nowMs });
+    const stored = (issue) => readJson(join(stepsDir, `${issue}.json`), null);
+    const parked = parkedView({ root: base, run, nowMs, markers });
+    const card = runCard({ root: base, run, nowMs, live: () => true, markers });
+    results.push(['a refused closed issue retires its open reconcile mark, and leaves the parked view and the card',
+      JSON.stringify(retired) === '[270]'
+        && JSON.stringify(stored(270)?.closed) === JSON.stringify({ outcome: 'refused', atMs: nowMs, code: 'PREMERGE_CI_COMPONENT_MISMATCH' })
+        && !parked.includes('#270 ') && !card.includes('#270 ')]);
+    results.push(['a mark newer than its refusal, other work, a pending delivery and an unrefused mark stay open and shown',
+      [271, 272, 273, 274].every((issue) => stored(issue)?.closed === undefined
+        && parked.includes(`#${issue} `) && card.includes(`#${issue} `))]);
+    results.push(['retiring again changes nothing', JSON.stringify(retireRefusedMarks({ dir, issues, refusals, nowMs: nowMs + 1 })) === '[]'
+      && stored(270)?.closed?.atMs === nowMs]);
+  } catch (error) {
+    results.push([`the refused-mark checks ran: ${error.message}`, false]);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+  return results;
+}
+
 // LFE, 2026-10-12: an automatically merged repository's delivered unit left
 // the parked view at its card while its merge was still pending, and the card
 // told a human to merge it.
@@ -2647,7 +2727,7 @@ export function renderSetupPhase(phase, badge = '⏳') {
   return `${badge} ∞ ${cells} ${index + 1}/${SETUP_PHASES.length} ${name} ─ ${detail}`;
 }
 
-const USAGE = 'usage: step.mjs --issue <N> --to <step> [--round full|fix-<1..3>|re-plan|open-findings] [--model <id>] [--fallback] [--staged] '
+const USAGE = 'usage: step.mjs --issue <N> --to <step> [--round full|fix-<1..3>|re-plan|open-findings|rework] [--model <id>] [--fallback] [--staged] '
   + '[--badge <b>] [--note <text>]\n       step.mjs --issue <N> --resumed <what> [--result <dispatch-result.json>] [--ms <n>]\n'
   + '       step.mjs --setup <resolve|audit|interview|write|verify> [--badge ⏳|❌|⚠️]\n       step.mjs --self-test';
 
@@ -2686,7 +2766,7 @@ export function parseArgs(argv) {
   }
   out.issue = /^[1-9]\d{0,8}$/u.test(String(out.issue)) ? Number(out.issue) : null;
   if (out.issue === null) return { ...out, error: '--issue must be a positive issue number' };
-  if (out.round !== null && !ROUND_RE.test(out.round)) return { ...out, error: '--round must be full, fix-<1..3>, re-plan or open-findings' };
+  if (out.round !== null && !ROUND_RE.test(out.round)) return { ...out, error: '--round must be full, fix-<1..3>, re-plan, open-findings or rework' };
   if (out.ms !== null) {
     out.ms = Number(out.ms);
     if (!Number.isFinite(out.ms)) return { ...out, error: '--ms needs a number' };

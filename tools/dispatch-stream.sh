@@ -15,8 +15,8 @@
 #
 # Example (background this whole command; watch its task view):
 #   bash <plugin-tools>/dispatch-stream.sh \
-#     /tmp/s/live/78-code-review-r1.jsonl /tmp/s/code-review-1-result.json \
-#     --role code-review --prompt-file /tmp/s/p.md
+#     <scratchpad>/live/78-code-review-r1.jsonl <scratchpad>/code-review-1-result.json \
+#     --role code-review --prompt-file <scratchpad>/p.md
 #
 # The typed result lands in <output-file>; stdout here is human-watchable event
 # flow only — collect from the file, never by parsing this stream.

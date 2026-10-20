@@ -12,7 +12,7 @@ Your first output, before a tool call, is exactly:
 ┌─┐ ┬ ┬ ┌┬┐ ┌─┐ ┬   ┌─┐ ┌─┐ ┌─┐
 ├─┤ │ │  │  │ │ │   │ │ │ │ ├─┘
 ┴ ┴ └─┘  ┴  └─┘ ┴─┘ └─┘ └─┘ ┴
-∞ dev · v0.72.0 · starting
+∞ dev · v0.72.1 · starting
 ```
 
 This session is the orchestrator: it plans, applies its own checklist pass and fixes, runs gates,
@@ -40,7 +40,7 @@ remedy; never devendor inside a Dev run.
 node <plugin-tools>/prime.mjs --json
 ```
 
-`{ok,version,repository,checkout,config,base,runMarker,waits,blocks,controls,paused,timings,snapshotPath,snapshotBytes,eligible,markers,sections,dispatches}`:
+`{ok,version,repository,checkout,config,base,scratch,runMarker,waits,blocks,controls,paused,timings,snapshotPath,snapshotBytes,eligible,markers,retiredMarks,sections,dispatches}`:
 
 - `markers` — lifecycle markers by issue: `gating` (issue open), `deferred` (issue closed),
   `knownRefused` (deferred markers the same driver already refused since they last changed).
@@ -87,7 +87,8 @@ with the Setup remedy). Never continue past a failure. Then:
      and the runner still has write. Ignore other identities; fail closed on incomplete role
      evidence.
    - Invalid trusted markers stop **their unit, never the run**. Only a human trust choice uses
-     `unit.mjs --block --reason POLICY_DENIED`; name the choice and quote the refusal as `--note`.
+     `unit.mjs --block --reason POLICY_DENIED --matter trust-marker`; name the choice and quote the
+     refusal as `--note`.
      Other faults are `fix` or `decide`. TERMINAL units: record the defect, no label or post.
      The driver seals unrepairable refusals as `terminal-refused`; the scan drops them.
    - `REVISION_REQUIRED` routes to Pitcrew, not a human block. A is historical; B is unreviewed.
@@ -278,7 +279,8 @@ The run record's `overlap:` line comes from `overlap-report.mjs`.
   **A step is announced ONCE, by its ribbon**: the line `step.mjs` prints on its tool row. Never
   repeat it in prose; extra detail is a `--note` suffix.
 - **The scratchpad is a write target, never a cwd**: never `cd <scratchpad> && …` (`git`, `gh`,
-  the driver, the gate need the repo cwd).
+  the driver, the gate need the repo cwd). It holds small files only. **Never make a checkout
+  under `/tmp`**: a checkout is `node <plugin-tools>/scratch.mjs --base <ref>`, on disk.
 - **After compaction, re-fetch byte-exact values** (SHA, planHash, comment id, label) from GitHub
   or disk; never recall them. Prefer a hand-off at a unit boundary over compacting mid-unit.
 
@@ -344,7 +346,8 @@ too). Without it the unit is not resumable: report it awaiting re-authorization 
 `gh issue edit <N> --add-label loop-ready` for its human, and take other work.
 
 **A resume past the fix budget is decided, not claimed**: recorded rounds already spent it →
-take the `REVIEW_REPLAN` choice (step 8) without claiming.
+take the `REVIEW_REPLAN` choice (step 8) without claiming; a hand-off answered `rework` → the
+rework (step 8).
 
 **Blocking never strips `loop-ready`**; it removes `loop-started` and the `loop:*` step label only.
 **The unblock is equally one human action, and equally irreversible by the loop**: a trusted actor
@@ -386,9 +389,8 @@ A staged unit uses `--staged` and gets no labels until its claim.
 body, boundary}`). The prompt carries the FULL issue (never an excerpt), lane constraints, and paths to STATE, the
 checklist, and the spec. The orchestrator keeps premise, selection, `planHash`, intent, and claim.
 **Never ask a read-only role to run a command; hand it the base as FILES**:
-`git worktree add --detach <scratchpad>/base-<sha8> origin/<base>` (`<sha8>`: the commit
-`origin/<base>` names; a path already there is that commit, reuse it), named in the prompt,
-removed at collection (`git worktree remove <scratchpad>/base-<sha8>`).
+`node <plugin-tools>/scratch.mjs --base origin/<base>` prints `{path,oid}`: a worktree of that
+commit, reused while it is current; name `path` in the prompt. It and prime prune unused ones.
 
 The plan contains: verified premises and evidence; module/API seam and file boundary; behavior and
 non-behavior; **rules as complete invariants**; acceptance checks and failure modes; applicable
@@ -402,7 +404,7 @@ match, consistent in event log, result, AND analysis prefix (`REPLAY_AND_PRESENT
 its implied cases enumerated (partial/complete, empty/populated, present/absent; exclusions marked
 non-behavior); a test per case; and its joint failure mode named. A rule no source settles is closed
 here: a clearly better option is a `decide`; only an unstated product value with no better option is
-a `human` block.
+a `human` block (`--matter product-value`), which `autoDecide` makes a `decide` of the narrowest value.
 
 Produce the planned lane proof from complete evidence. Unknown scope is full.
 
@@ -439,7 +441,7 @@ Write the closed request
 to a file:
 
 ```bash
-node <plugin-tools>/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
+node <plugin-tools>/lifecycle-driver.mjs --reconcile-json < <scratchpad>/<N>-lifecycle-request.json
 ```
 
 Compose it from `lifecycle-driver.mjs --example-request` with `jq -n --rawfile` (no `boundary`);
@@ -549,10 +551,19 @@ ID. Fixes are dispatched (`WRITER_MADE_NO_CHANGE` refuses a fixer that did nothi
   Critical; a re-raise is the same deferral. PR body: `deferredFindings` under `## Deferred
   findings`, `scopeChanges` under `## Scope changes`.
 - **After the re-plan round, one round.** A Critical it raised: one fix round, then the closing
-  full round. A Major: `defer` (seam) or `decide` in the closing round, else `REVIEW_OPEN_FINDINGS`:
-  `step.mjs --to 08-code-review --round open-findings` (labels `human:decide`), a repair per
-  `openFindings` entry under `## Open findings`, push, PR stays draft, `unit.mjs --block --reason
-  POLICY_DENIED --question "<accept, rework or drop?>"`; a Critical still open blocks the same way.
+  full round. A Major: `defer` (seam) or `decide` in the closing round, else the hand-off
+  (`REVIEW_OPEN_FINDINGS`; `POLICY_DENIED` for a Critical still open). Each `unit.mjs` call below passes its
+  `--review-fingerprint <reviewEvidenceFingerprint> --review-round <round>`. With `autoDecide` on the
+  loop reworks once: `unit.mjs --decide --instead-of open-findings --choice "rework once"`, then the
+  rework. Else, or when that rework is spent: `step.mjs --to 08-code-review --round open-findings`
+  (labels `human:decide`), a repair per `openFindings` entry under `## Open findings`, push, PR stays
+  draft, `unit.mjs --block --reason POLICY_DENIED --matter open-findings --question "/answer rework |
+  accept | drop?"`.
+- **A rework reopens the hand-off** (that decision or an `/answer rework…`): `unit.mjs --rework-authorization
+  --issue <N> --review-fingerprint <fp> --out <scratchpad>/<N>-rework.json`, one fix round
+  (`step.mjs --round rework`, `--rework-authorization-file` on its append), then the closing
+  `--scope full` round. Still open: the hand-off again. `NO_REWORK_AUTHORIZATION`: the block
+  stands. A publish refused for a rework not on GitHub: the hand-off again.
 
 ### Carving out a predicate
 
@@ -684,7 +695,7 @@ Write the closed terminal request to a bounded file:
 `receiptFingerprint` is the clean `reviewTransition()`'s `reviewEvidenceFingerprint`. Then:
 
 ```bash
-node <plugin-tools>/lifecycle-driver.mjs --reconcile-json < /tmp/autoloop-lifecycle-request.json
+node <plugin-tools>/lifecycle-driver.mjs --reconcile-json < <scratchpad>/<N>-lifecycle-request.json
 node <plugin-tools>/publish-verdict.mjs terminal-finalize \
   --request-file <terminal-request.json> \
   --review-evidence-file <exact-clean-review-input.json>
@@ -807,7 +818,7 @@ Steps: `00-reconcile 01-premise 02-plan 03-plan-review 04-claim 05-implement 06-
 
 - `--model`: the result's `model`; omit for your own steps
   (`⚪ ORCHESTRATOR`). `--fallback` when it ran. Review/fix rounds pass `--round full|fix-<1..3>|
-  re-plan|open-findings` (a fix round is `08-fix`); plan review takes none.
+  re-plan|open-findings|rework` (a fix round is `08-fix`); plan review takes none.
 - Orphan reconciliation announces `00-reconcile` before any fetch or driver call. `⚠️ #N skipped
   <steps>` is expected only for 06; any other skip is a defect to fix first.
 - The dot is the model's colour (🟣 Fable, 🟠 Opus, 🟢 Astra, 🔵 Sonnet, 🟡 Haiku, ⚪ other).
@@ -867,14 +878,20 @@ a contract module directly.
 
 Every obstacle is exactly one class; only `human` stops the unit:
 
-- **`human`** — an authorization only a human gives: an irreversible external act
-  (`IRREVERSIBLE_ACTION`: production write, provisioning, message sent, data/history destruction)
-  or a denial (`POLICY_DENIED`: a secret, a dependency install, a permission — merge, credentials,
-  protected paths, branch protection, `loop-ready` — a STATE exception, or a finding surviving the
-  re-plan round).
-  `node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE> --question "<one line>"`
-  (`--gate human:authorize` for protected paths) records `/answer`, swaps labels, and keeps
-  `loop-ready`. Other codes are refused; a specification gap is a `decide`, never a block.
+- **`human`** — an authorization only a human gives:
+  `node <plugin-tools>/unit.mjs --block --issue <N> --reason <CODE> --matter <matter> --question "<one
+  line>"` (`--gate human:authorize` for protected paths) records `/answer`, swaps labels, and keeps
+  `loop-ready`. These matters always block: `irreversible` (`IRREVERSIBLE_ACTION`: production write,
+  provisioning, message sent, data/history destruction); with `POLICY_DENIED`: `secret`,
+  `dependency` (an install or install-script change), `merge-authorization`, `permission`
+  (credentials, branch protection, `loop-ready`, a host or classifier denial), `trust-marker`. The
+  auto matters are `open-findings` (rework once, step 8; a second is `REWORK_SPENT`),
+  `state-exception` (comply with STATE), `protected-build` (build in the admitted plan; the PR
+  carries `human:authorize`) and `product-value` (the narrowest value, with the alternatives).
+  While `autoDecide` is on (the default; prime's `config` line) each is a `decide` with
+  `--instead-of <matter>` and that recommendation, and `--block` refuses it (`BLOCK_AUTO_DECIDABLE`);
+  while it is off, `--instead-of` is refused (`AUTO_DECIDE_OFF`). Other codes are refused;
+  a specification gap is a `decide`, never a block.
 - **`fix`** — code, tests, docs, CI config, a dependency, or a correctable premise. In the unit's
   lane fix it in-unit; otherwise `node <plugin-tools>/unit.mjs --repair --parent <N> --title "<…>"
   --body-file <path>` (`--blocks-parent` when the unit needs it) and take it next, or carry on if
@@ -908,8 +925,8 @@ remedy) stops the RUN; never improvise past a guardrail.
   own `--out`/flags. The one exception is step 9's `publish-verdict.mjs gate <head> > <log> 2>&1`.
   Never write under `.git/` with Write, Edit, or a redirect; recordings there go through a tool.
 - "stage 2 classifier error"/"classifier unavailable": retry the same call once, unchanged. A policy
-  denial of a loop step: `unit.mjs --block --reason POLICY_DENIED`, verbatim reason as `--note`,
-  next unit — never a run halt.
+  denial of a loop step: `unit.mjs --block --reason POLICY_DENIED --matter permission`, verbatim
+  reason as `--note`, next unit — never a run halt.
 - Never ask the operator a question while the run is live (AskUserQuestion is guard-refused until
   `--close-run`): judgment → `unit.mjs --decide`, human decision → `unit.mjs --block`, then the next
   unit.

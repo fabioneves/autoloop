@@ -111,7 +111,13 @@ const LEDGER_KEYS = [
 // finding: its raisings count under the predicate. Optional, so evidence
 // recorded before 0.69.0 still validates; absent, the finding id is the key.
 const LEDGER_OPTIONAL_KEYS = ['predicate', 'paths', 'seam'];
-const ROUND_OPTIONAL_KEYS = ['deltaPaths'];
+const ROUND_OPTIONAL_KEYS = ['deltaPaths', 'reworkAuthorization'];
+// What reopens a unit after the re-plan hand-off (SPEC-review-rounds §5a): a
+// human's `/answer rework`, or the one rework the loop decides. It names the
+// hand-off round and that round's exact evidence; publish-verdict checks the
+// comment on GitHub before it posts the review status.
+const REWORK_KEYS = ['kind', 'issue', 'comment', 'round', 'evidenceFingerprint'];
+const REWORK_KINDS = new Set(['answer', 'decision']);
 const SCOPE_CHANGE_KEYS = ['findingId', 'paths', 'rationale'];
 const MAX_BOUNDARY_ENTRIES = 1000;
 const REBUTTAL_KEYS = ['findingId', 'claim', 'evidence'];
@@ -275,9 +281,24 @@ function sameIdentity(left, right) {
   return a[0] === b[0] && sameModel(a[1], b[1]);
 }
 
+function validReworkAuthorization(grant) {
+  return hasExactKeys(grant, REWORK_KEYS)
+    && REWORK_KINDS.has(grant.kind)
+    && Number.isSafeInteger(grant.issue)
+    && grant.issue >= 1
+    && boundedText(grant.comment, 1, 512)
+    && /^https:\/\/\S+$/u.test(grant.comment)
+    && DECISION_LINK_RE.test(grant.comment)
+    && Number.isSafeInteger(grant.round)
+    && grant.round >= 1
+    && grant.round <= 100
+    && HASH_RE.test(grant.evidenceFingerprint);
+}
+
 export function validReviewRound(record) {
   return hasKeys(record, ROUND_KEYS, ROUND_OPTIONAL_KEYS)
     && (record.deltaPaths === undefined || validBoundary(record.deltaPaths, 10000))
+    && (record.reworkAuthorization === undefined || validReworkAuthorization(record.reworkAuthorization))
     && Number.isSafeInteger(record.round)
     && record.round >= 1
     && record.round <= 100
@@ -397,6 +418,27 @@ function validCumulativeLedger(previous, current) {
 function openEntries(record, disposition) {
   return record.priorFindings.filter((entry) =>
     entry.state === 'open' && entry.disposition === disposition);
+}
+
+// The open entries a round fixes: a `fix` or a `widen` disposition.
+function openFixes(record) {
+  return [...openEntries(record, 'fix'), ...openEntries(record, 'widen')];
+}
+
+// The findings a round's ledger defers: a deferral stands until the unit closes.
+function deferredIn(record) {
+  return new Set(record.priorFindings
+    .filter(({ disposition }) => disposition === 'defer').map(({ findingId }) => findingId));
+}
+
+// SPEC-review-rounds §5: after the re-plan a Major is deferred outside the seam
+// (the deferral names it) or decided (the rebuttal names the decision comment),
+// never deferred or rebutted bare — the fix budget no longer excuses either. A
+// deferral standing from the round before carries as it stands.
+function boundedDispositions(record, previous) {
+  const standing = deferredIn(previous);
+  return openEntries(record, 'defer').every(({ findingId, seam }) => seam !== undefined || standing.has(findingId))
+    && openEntries(record, 'rebut').every(({ rationale }) => DECISION_LINK_RE.test(rationale));
 }
 
 // Convergence closes on a full-artifact round, and the closing round may be a
@@ -662,13 +704,40 @@ function raisingsOf(rounds, predicate, predicateOf) {
 // same artifact. The refusals name themselves: REVIEW_FIX_BUDGET_SPENT for a
 // fourth fix round, or a second decision on a predicate a fresh reviewer
 // already rejected; REVIEW_REPLAN_SPENT for a round past the re-plan round's
-// one admitted round (and its closing round after a Critical fix).
+// one admitted round (and its closing round after a Critical fix);
+// REVIEW_REWORK_SPENT for a rework its hand-off does not admit.
+//
+// SPEC-review-rounds §5a: the round a rework names is a hand-off after the
+// re-plan — a gating finding open, not the re-plan round's own Critical,
+// which is still fixed — and this round is the one fix round after it, or
+// the closing full round over the same plan.
+function reworkAdmitted(rounds, index, replanRound, grant) {
+  if (replanRound === null) return false;
+  const from = rounds.findIndex(({ round }) => round === grant.round);
+  if (from === -1 || from >= index || hashValue(rounds[from]) !== grant.evidenceFingerprint) return false;
+  // A re-raised deferral gates nothing (reviewTransition), so it hands nothing off.
+  const deferred = deferredIn(rounds[from]);
+  const gating = gatingFindings(rounds[from].verdict).filter(({ id }) => !deferred.has(id));
+  const handoff = gating.length > 0
+    && (from > replanRound || gating.every(({ severity }) => severity !== 'Critical'));
+  const current = rounds[index];
+  if (!handoff || current.planFingerprint !== rounds[index - 1].planFingerprint || !boundedDispositions(current, rounds[index - 1])) return false;
+  if (index === from + 1) return true;
+  return index === from + 2 && openFixes(current).length === 0 && current.scope === REVIEW_SCOPES.get('full')
+    && hashValue(rounds[from + 1].reworkAuthorization ?? {}) === hashValue(grant);
+}
+
 function roundBudget(rounds, predicateOf, gaps = []) {
   let fixRounds = 0;
   let replanRound = null;
   let postReplanFix = false;
   const decided = new Set();
   const rejected = new Set();
+  const decidedReworks = new Set();
+  if (rounds[0].reworkAuthorization !== undefined) {
+    gaps.push('round 1: a rework follows the re-plan hand-off');
+    return { code: 'REVIEW_REWORK_SPENT' };
+  }
   for (let index = 1; index < rounds.length; index += 1) {
     const previous = rounds[index - 1];
     const current = rounds[index];
@@ -677,17 +746,28 @@ function roundBudget(rounds, predicateOf, gaps = []) {
       const predicate = predicateOf(rebut.findingId);
       if (rebut.status === 'rejected' && decided.has(predicate)) rejected.add(predicate);
     }
+    const grant = current.reworkAuthorization;
+    if (grant !== undefined) {
+      if (grant.kind === 'decision') decidedReworks.add(grant.evidenceFingerprint);
+      if (decidedReworks.size > 1 || !reworkAdmitted(rounds, index, replanRound, grant)) {
+        gaps.push(
+          `${at}: a rework admits one fix round, then the closing full round, after the re-plan `
+          + `hand-off it names (round ${grant.round}, its exact evidence); the loop decides one `
+          + 'rework per unit, a human answers any other',
+        );
+        return { code: 'REVIEW_REWORK_SPENT' };
+      }
+      continue;
+    }
     if (replanRound !== null) {
       // SPEC-review-rounds §5: a finding first seen in the re-plan round still
       // gets one round — fixing only Criticals, or deferring (naming the seam)
       // and deciding (naming the decision comment) Majors — then the closing
       // full round after a Critical fix. Nothing else follows the re-plan.
-      const fixes = [...openEntries(current, 'fix'), ...openEntries(current, 'widen')];
-      const admitted = current.planFingerprint === previous.planFingerprint && (
+      const fixes = openFixes(current);
+      const admitted = current.planFingerprint === previous.planFingerprint && boundedDispositions(current, previous) && (
         index === replanRound + 1
           ? fixes.every(({ severity }) => severity === 'Critical')
-            && openEntries(current, 'defer').every(({ seam }) => seam !== undefined)
-            && openEntries(current, 'rebut').every(({ rationale }) => DECISION_LINK_RE.test(rationale))
           : index === replanRound + 2 && postReplanFix && fixes.length === 0
             && current.scope === REVIEW_SCOPES.get('full'));
       if (!admitted) {
@@ -710,7 +790,7 @@ function roundBudget(rounds, predicateOf, gaps = []) {
       continue;
     }
     const spent = fixRounds >= FIX_ROUND_BUDGET;
-    const fixes = [...openEntries(current, 'fix'), ...openEntries(current, 'widen')];
+    const fixes = openFixes(current);
     if (fixes.length > 0) {
       if (spent && !fixes.some(({ severity }) => severity === 'Critical')) {
         gaps.push(
@@ -857,6 +937,12 @@ export function reviewTransition(input) {
     }
   }
   const deferredIds = new Set(deferred.map(({ findingId }) => findingId));
+  // Each distinct rework in the ledger, once: the fix round and its closing
+  // round carry the same one.
+  const reworks = new Map();
+  for (const { reworkAuthorization } of history.rounds) {
+    if (reworkAuthorization !== undefined) reworks.set(hashValue(reworkAuthorization), structuredClone(reworkAuthorization));
+  }
   // The evidence every publishable (clean) decision carries.
   const closedEvidence = () => ({
     ...(deferred.length === 0 ? {} : {
@@ -866,6 +952,8 @@ export function reviewTransition(input) {
     ...((input.scopeChanges?.length ?? 0) === 0 ? {} : {
       scopeChanges: structuredClone(input.scopeChanges),
     }),
+    // Each rework that reopened the unit, for publish-verdict to check on GitHub.
+    ...(reworks.size === 0 ? {} : { reworkAuthorizations: [...reworks.values()] }),
     reviewedHead: history.current.headOid,
     reviewedCheckout: structuredClone(history.current.checkout),
     reviewEvidenceFingerprint: hashValue(history.current),
@@ -904,7 +992,9 @@ export function reviewTransition(input) {
   }
 
   const critical = currentGating.some(({ severity }) => severity === 'Critical');
-  const late = input.scope === 'delta' && (!budgetSpent || critical)
+  // After the re-plan no fix round follows to widen into: what still gates is
+  // the hand-off below, never a full round the budget then refuses.
+  const late = input.scope === 'delta' && !budget.afterReplan && (!budgetSpent || critical)
     ? currentGating.filter(({ id }) => annotations.get(id).inScope !== true)
     : [];
   // A real defect the delta could not see is a reason to look wider, not to
@@ -953,7 +1043,14 @@ export function reviewTransition(input) {
   // repair and the unit goes out as a draft with `## Open findings` and
   // `human:decide` — the one review path that waits for a human.
   if (budget.replanRound !== null && (budget.afterReplan || !critical)) {
-    const handoff = { ...detail, openFindings, reviewedHead: history.current.headOid };
+    // The round and its evidence: a rework names both (SPEC-review-rounds §5a).
+    const handoff = {
+      ...detail,
+      openFindings,
+      reviewedHead: history.current.headOid,
+      round: history.current.round,
+      reviewEvidenceFingerprint: hashValue(history.current),
+    };
     return critical
       ? decision('block', 'POLICY_DENIED', handoff)
       : decision('draft', 'REVIEW_OPEN_FINDINGS', handoff);
@@ -1243,6 +1340,22 @@ export function appendRound(evidence, result, options = {}) {
     if (!REVIEW_SCOPES.has(options.scope)) {
       return refuse('INVALID_SCOPE', 'scope must be full or delta');
     }
+    // A rework rides every round after the hand-off it reopened; a new one
+    // binds to the hand-off this evidence ends on (SPEC-review-rounds §5a).
+    let reworkAuthorization = previous.reworkAuthorization;
+    if (options.reworkAuthorization !== undefined) {
+      const grant = options.reworkAuthorization;
+      if (!validReworkAuthorization(grant)
+        || !['draft', 'block'].includes(reviewTransition(evidence).state)
+        || grant.round !== previous.round
+        || grant.evidenceFingerprint !== hashValue(previous)) {
+        return refuse(
+          'REWORK_NOT_AUTHORIZABLE',
+          'a rework names a draft or block hand-off: its round and its reviewEvidenceFingerprint',
+        );
+      }
+      reworkAuthorization = structuredClone(grant);
+    }
     // A re-plan round carries its new frozen plan; the contract allows one.
     const planFingerprint = options.planFingerprint ?? previous.planFingerprint;
     if (!HASH_RE.test(planFingerprint)) {
@@ -1263,6 +1376,7 @@ export function appendRound(evidence, result, options = {}) {
       if (entry.disposition === 'defer' && !dispositions.has(entry.findingId)) {
         dispositions.set(entry.findingId, {
           findingId: entry.findingId, disposition: 'defer', rationale: entry.rationale,
+          ...(entry.seam === undefined ? {} : { seam: entry.seam }),
         });
       }
     }
@@ -1345,6 +1459,7 @@ export function appendRound(evidence, result, options = {}) {
         ? undefined
         : scopeChanges,
       deltaPaths: options.scope === 'delta' ? options.deltaPaths : undefined,
+      reworkAuthorization,
       planFingerprint,
       configFingerprint: previous.configFingerprint,
       configuredBaseOid: previous.configuredBaseOid,
@@ -1378,6 +1493,7 @@ export function appendRound(evidence, result, options = {}) {
     openRebuttals,
     verdict: structuredClone(verdict),
     ...(base.deltaPaths === undefined ? {} : { deltaPaths: [...base.deltaPaths] }),
+    ...(base.reworkAuthorization === undefined ? {} : { reworkAuthorization: structuredClone(base.reworkAuthorization) }),
   };
   const appended = {
     round: base.round,
@@ -1440,6 +1556,7 @@ export function authorizeReviewPublication(input, targetHeadOid, liveCheckout) {
     repositoryFingerprint:
       transition.reviewedCheckout?.repositoryFingerprint ?? null,
     reviewEvidenceFingerprint: transition.reviewEvidenceFingerprint ?? null,
+    reworkAuthorizations: transition.reworkAuthorizations ?? [],
   };
 }
 
@@ -1555,6 +1672,7 @@ function roundFactory(projectConfig = fixtureProjectConfig(), options = {}) {
       },
       priorFindings: overrides.priorFindings ?? [...ledger.values()],
       ...(overrides.deltaPaths === undefined ? {} : { deltaPaths: overrides.deltaPaths }),
+      ...(overrides.reworkAuthorization === undefined ? {} : { reworkAuthorization: overrides.reworkAuthorization }),
       openRebuttals: overrides.openRebuttals ?? verdict.rebuts.map(({ findingId }) => ({
         findingId,
         claim: `Re-evaluate ${findingId} against the fix delta.`,
@@ -1793,6 +1911,142 @@ function selfTest() {
     replanCriticalOpen.factory(6, failWith([criticalInReplan])),
   ];
   const replanCriticalSecondFix = replanCriticalOpen.factory(7, failWith([criticalInReplan]));
+  // SPEC-review-rounds §5a: after the hand-off a rework a human answered, or
+  // the one the loop decided, admits one fix round and the closing full
+  // round, bound to the hand-off round's exact evidence.
+  const reworkChain = (seed, handoffVerdict = null) => {
+    const chain = spentChain(seed);
+    const handoff = chain.factory(5, handoffVerdict ?? failWith([chain.major]),
+      { scope: 'full-artifact', planFingerprint: hash(`plan-${seed}-v2`) });
+    const grant = (from, kind = 'answer', comment = 88) => ({
+      kind, issue: 1, comment: `https://example.test/acme/widgets/issues/1#issuecomment-${comment}`,
+      round: from.round, evidenceFingerprint: hashValue(from),
+    });
+    return { ...chain, rounds: [...chain.rounds, handoff], handoff, grant };
+  };
+  const rework = reworkChain('rework');
+  const reworkGrant = rework.grant(rework.handoff);
+  const reworkFixed = rework.factory(6, pass, { reworkAuthorization: reworkGrant });
+  const reworkClose = rework.factory(7, pass, { ...sameArtifactAs(reworkFixed), reworkAuthorization: reworkGrant });
+  const reworkPast = rework.factory(8, pass, { ...sameArtifactAs(reworkClose), reworkAuthorization: reworkGrant });
+  const unauthorized = reworkChain('rework-unauthorized');
+  const unauthorizedFix = unauthorized.factory(6, pass);
+  const mismatched = reworkChain('rework-mismatch');
+  const mismatchedFix = mismatched.factory(6, pass, {
+    reworkAuthorization: { ...mismatched.grant(mismatched.handoff), evidenceFingerprint: hash('another hand-off') },
+  });
+  const stillOpen = reworkChain('rework-still-open');
+  const stillOpenFix = stillOpen.factory(6, failWith([stillOpen.major]), { reworkAuthorization: stillOpen.grant(stillOpen.handoff, 'decision') });
+  const secondRework = reworkChain('rework-second-decision');
+  const secondReworkRounds = [secondRework.factory(6, failWith([secondRework.major]),
+    { reworkAuthorization: secondRework.grant(secondRework.handoff, 'decision') })];
+  secondReworkRounds.push(secondRework.factory(7, pass,
+    { reworkAuthorization: secondRework.grant(secondReworkRounds[0], 'decision', 89) }));
+  const answerAfterDecision = reworkChain('rework-answer-after-decision');
+  const answerAfterDecisionRounds = [answerAfterDecision.factory(6, failWith([answerAfterDecision.major]),
+    { reworkAuthorization: answerAfterDecision.grant(answerAfterDecision.handoff, 'decision') })];
+  answerAfterDecisionRounds.push(answerAfterDecision.factory(7, pass,
+    { reworkAuthorization: answerAfterDecision.grant(answerAfterDecisionRounds[0], 'answer', 90) }));
+  const noReplan = spentChain('rework-no-replan');
+  const noReplanFix = noReplan.factory(5, pass, { reworkAuthorization: {
+    kind: 'answer', issue: 1, comment: 'https://example.test/acme/widgets/issues/1#issuecomment-91',
+    round: 4, evidenceFingerprint: hashValue(noReplan.rounds[3]),
+  } });
+  const closeFix = reworkChain('rework-close-fix');
+  const closeFixRounds = [closeFix.factory(6, failWith([closeFix.major]), { reworkAuthorization: closeFix.grant(closeFix.handoff) })];
+  closeFixRounds.push(closeFix.factory(7, pass, { scope: 'full-artifact', reworkAuthorization: closeFix.grant(closeFix.handoff) }));
+  const closeDelta = reworkChain('rework-close-delta');
+  const closeDeltaRounds = [closeDelta.factory(6, pass, { reworkAuthorization: closeDelta.grant(closeDelta.handoff) })];
+  closeDeltaRounds.push(closeDelta.factory(7, pass, { reworkAuthorization: closeDelta.grant(closeDelta.handoff) }));
+  const skippedFix = reworkChain('rework-skipped-fix');
+  const skippedFixRounds = [skippedFix.factory(6, pass, { ...sameArtifactAs(skippedFix.handoff), defer: [skippedFix.major.id], seam: 'services/billing' })];
+  skippedFixRounds.push(skippedFix.factory(7, pass, { ...sameArtifactAs(skippedFixRounds[0]), reworkAuthorization: skippedFix.grant(skippedFix.handoff) }));
+  const newPlan = reworkChain('rework-new-plan');
+  const newPlanFix = newPlan.factory(6, pass, {
+    scope: 'full-artifact', planFingerprint: hash('plan-rework-new-plan-v3'), reworkAuthorization: newPlan.grant(newPlan.handoff),
+  });
+  const otherGrant = reworkChain('rework-other-grant');
+  const otherGrantRounds = [otherGrant.factory(6, pass, { reworkAuthorization: otherGrant.grant(otherGrant.handoff) })];
+  otherGrantRounds.push(otherGrant.factory(7, pass, {
+    ...sameArtifactAs(otherGrantRounds[0]), reworkAuthorization: otherGrant.grant(otherGrant.handoff, 'answer', 93),
+  }));
+  const firstRoundGrant = roundFactory(fixtureProjectConfig(), { seed: 'rework-first' })(1, pass, { reworkAuthorization: {
+    kind: 'answer', issue: 1, comment: 'https://example.test/acme/widgets/issues/1#issuecomment-92', round: 1, evidenceFingerprint: hash('none'),
+  } });
+  const criticalHandoff = reworkChain('rework-critical', failWith([criticalInReplan]));
+  const criticalHandoffFix = criticalHandoff.factory(6, pass, { reworkAuthorization: criticalHandoff.grant(criticalHandoff.handoff) });
+  // The rework fixes: neither of its rounds defers the open Major bare (no
+  // seam) and publishes clean.
+  const bareDefer = reworkChain('rework-bare-defer');
+  const bareDeferFix = bareDefer.factory(6, pass, {
+    defer: [bareDefer.major.id], reworkAuthorization: bareDefer.grant(bareDefer.handoff),
+  });
+  const bareClose = reworkChain('rework-bare-close');
+  const bareCloseRounds = [bareClose.factory(6, failWith([bareClose.major]), { reworkAuthorization: bareClose.grant(bareClose.handoff) })];
+  bareCloseRounds.push(bareClose.factory(7, pass, {
+    ...sameArtifactAs(bareCloseRounds[0]), scope: 'full-artifact', defer: [bareClose.major.id],
+    reworkAuthorization: bareClose.grant(bareClose.handoff),
+  }));
+  const bareRebut = reworkChain('rework-bare-rebut');
+  const bareRebutFix = bareRebut.factory(6, {
+    verdict: 'pass', findings: [], rebuts: [accept(bareRebut.major.id, 'Accepted.')],
+  }, { reworkAuthorization: bareRebut.grant(bareRebut.handoff) });
+  const replanBareClose = spentChain('replan-bare-close');
+  const replanBareMajor = { ...finding, id: 'major-after-critical-fix' };
+  const replanBareCloseRounds = [
+    replanBareClose.factory(5, failWith([criticalInReplan]),
+      { scope: 'full-artifact', planFingerprint: hash('plan-replan-bare-close-v2') }),
+  ];
+  replanBareCloseRounds.push(replanBareClose.factory(6, failWith([replanBareMajor])));
+  replanBareCloseRounds.push(replanBareClose.factory(7, pass, {
+    ...sameArtifactAs(replanBareCloseRounds[1]), scope: 'full-artifact', defer: [replanBareMajor.id],
+  }));
+  // A deferral standing from an earlier round carries as it stands: the limit
+  // binds a new deferral after the re-plan, not one already filed.
+  const replanSeam = spentChain('replan-seam');
+  const replanSeamMajor = { ...finding, id: 'major-seam-after-replan' };
+  const replanSeamRounds = [
+    replanSeam.factory(5, failWith([criticalInReplan, replanSeamMajor]),
+      { scope: 'full-artifact', planFingerprint: hash('plan-replan-seam-v2') }),
+  ];
+  replanSeamRounds.push(replanSeam.factory(6, failWith([replanSeamMajor]), { defer: [replanSeamMajor.id], seam: 'services/billing' }));
+  replanSeamRounds.push(replanSeam.factory(7, pass, {
+    ...sameArtifactAs(replanSeamRounds[1]), scope: 'full-artifact', defer: [replanSeamMajor.id],
+  }));
+  const predeferred = spentChain('rework-predeferred');
+  const predeferredMajor = { ...finding, id: 'major-in-rework-replan' };
+  predeferred.rounds.push(predeferred.factory(5, failWith([predeferred.major, predeferredMajor]), {
+    scope: 'full-artifact', planFingerprint: hash('plan-rework-predeferred-v2'), defer: [predeferred.major.id],
+  }));
+  const predeferredFix = predeferred.factory(6, pass, {
+    defer: [predeferred.major.id], reworkAuthorization: {
+      kind: 'answer', issue: 1, comment: 'https://example.test/acme/widgets/issues/1#issuecomment-94',
+      round: 5, evidenceFingerprint: hashValue(predeferred.rounds[4]),
+    },
+  });
+  // A round whose only gating finding is already deferred is no hand-off.
+  const deferredOnly = spentChain('rework-deferred-only');
+  deferredOnly.rounds.push(deferredOnly.factory(5, failWith([deferredOnly.major]), {
+    scope: 'full-artifact', planFingerprint: hash('plan-rework-deferred-only-v2'), defer: [deferredOnly.major.id],
+  }));
+  const deferredOnlyFix = deferredOnly.factory(6, pass, {
+    defer: [deferredOnly.major.id], reworkAuthorization: {
+      kind: 'answer', issue: 1, comment: 'https://example.test/acme/widgets/issues/1#issuecomment-95',
+      round: 5, evidenceFingerprint: hashValue(deferredOnly.rounds[4]),
+    },
+  });
+  // A Critical outside the delta of the round after the hand-off is the
+  // human's: no fix round follows it to widen into.
+  const outsideCritical = { ...cumulativeFinding, id: 'critical-outside-delta', severity: 'Critical' };
+  const outsideAnnotations = [{ id: outsideCritical.id, verified: true, inScope: false }];
+  const reworkOutside = reworkChain('rework-outside');
+  const reworkOutsideFix = reworkOutside.factory(6, failWith([outsideCritical]), { reworkAuthorization: reworkOutside.grant(reworkOutside.handoff) });
+  const replanOutside = spentChain('replan-outside');
+  const replanOutsideRounds = [
+    replanOutside.factory(5, failWith([criticalInReplan]),
+      { scope: 'full-artifact', planFingerprint: hash('plan-replan-outside-v2') }),
+  ];
+  replanOutsideRounds.push(replanOutside.factory(6, failWith([outsideCritical])));
   // A Major first seen in the re-plan round may be deferred outside the seam
   // (or decided) in the closing round instead of handed off.
   const replanDefer = spentChain('replan-defer');
@@ -2127,6 +2381,156 @@ function selfTest() {
       input: inputFor([...replanOpen.rounds, replanStillMajor, secondReplan], fixtureProjectConfig(), { scope: 'full' }),
       expected: ['error', false],
       expectedCode: 'REVIEW_REPLAN_SPENT',
+    },
+    {
+      name: 'an authorized rework after the hand-off admits one fix round',
+      input: inputFor([...rework.rounds, reworkFixed]),
+      expected: ['continue', false],
+      expectedCode: 'REVIEW_FULL_CLOSE_REQUIRED',
+    },
+    {
+      name: 'the closing round of an authorized rework delivers',
+      input: inputFor([...rework.rounds, reworkFixed, reworkClose], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['clean', true],
+      expectedCode: 'REVIEW_CLEAN',
+    },
+    {
+      name: 'a round past the closing round of a rework is refused',
+      input: inputFor([...rework.rounds, reworkFixed, reworkClose, reworkPast], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REWORK_SPENT',
+    },
+    {
+      name: 'a fix after the hand-off without an authorization is still refused',
+      input: inputFor([...unauthorized.rounds, unauthorizedFix]),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REPLAN_SPENT',
+    },
+    {
+      name: 'a rework bound to other evidence than the hand-off round is refused',
+      input: inputFor([...mismatched.rounds, mismatchedFix]),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REWORK_SPENT',
+    },
+    {
+      name: 'a Major still open after the rework fix round is handed off again',
+      input: inputFor([...stillOpen.rounds, stillOpenFix]),
+      expected: ['draft', false],
+      expectedCode: 'REVIEW_OPEN_FINDINGS',
+    },
+    {
+      name: 'the loop decides one rework per unit; a second decided rework is refused',
+      input: inputFor([...secondRework.rounds, ...secondReworkRounds]),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REWORK_SPENT',
+    },
+    {
+      name: 'a human answer may grant a rework after the decided one',
+      input: inputFor([...answerAfterDecision.rounds, ...answerAfterDecisionRounds]),
+      expected: ['continue', false],
+      expectedCode: 'REVIEW_FULL_CLOSE_REQUIRED',
+    },
+    {
+      name: 'the closing round of a rework fixes nothing',
+      input: inputFor([...closeFix.rounds, ...closeFixRounds], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REWORK_SPENT',
+    },
+    {
+      name: 'the closing round of a rework reviews the complete artifact',
+      input: inputFor([...closeDelta.rounds, ...closeDeltaRounds]),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REWORK_SPENT',
+    },
+    {
+      name: 'a rework closing round needs the rework fix round before it',
+      input: inputFor([...skippedFix.rounds, ...skippedFixRounds], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REWORK_SPENT',
+    },
+    {
+      name: 'a rework keeps the plan: a new plan is a second re-plan',
+      input: inputFor([...newPlan.rounds, newPlanFix], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REWORK_SPENT',
+    },
+    {
+      name: 'the closing round carries the rework of its fix round',
+      input: inputFor([...otherGrant.rounds, ...otherGrantRounds], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REWORK_SPENT',
+    },
+    {
+      name: 'round 1 carries no rework',
+      input: inputFor([firstRoundGrant]),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REWORK_SPENT',
+    },
+    {
+      name: 'a rework follows the re-plan hand-off only',
+      input: inputFor([...noReplan.rounds, noReplanFix]),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REWORK_SPENT',
+    },
+    {
+      name: 'a re-plan round whose Critical is still fixed in the next round is no hand-off to rework',
+      input: inputFor([...criticalHandoff.rounds, criticalHandoffFix]),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REWORK_SPENT',
+    },
+    {
+      name: 'the rework fix round defers no Major bare',
+      input: inputFor([...bareDefer.rounds, bareDeferFix]),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REWORK_SPENT',
+    },
+    {
+      name: 'the rework fix round rebuts no Major without its decision comment',
+      input: inputFor([...bareRebut.rounds, bareRebutFix]),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REWORK_SPENT',
+    },
+    {
+      name: 'the rework closing round defers no Major its fix round left open bare',
+      input: inputFor([...bareClose.rounds, ...bareCloseRounds], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REWORK_SPENT',
+    },
+    {
+      name: 'the closing round after the re-plan Critical fix defers no Major bare',
+      input: inputFor([...replanBareClose.rounds, ...replanBareCloseRounds], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REPLAN_SPENT',
+    },
+    {
+      name: 'a seam deferral standing from the round after the re-plan carries into its closing round',
+      input: inputFor([...replanSeam.rounds, ...replanSeamRounds], fixtureProjectConfig(), { scope: 'full' }),
+      expected: ['clean', true],
+      expectedCode: 'REVIEW_CLEAN',
+    },
+    {
+      name: 'a deferral standing from before the re-plan carries into the rework fix round',
+      input: inputFor([...predeferred.rounds, predeferredFix]),
+      expected: ['continue', false],
+      expectedCode: 'REVIEW_FULL_CLOSE_REQUIRED',
+    },
+    {
+      name: 'a round whose only gating finding is already deferred is no hand-off to rework',
+      input: inputFor([...deferredOnly.rounds, deferredOnlyFix]),
+      expected: ['error', false],
+      expectedCode: 'REVIEW_REWORK_SPENT',
+    },
+    {
+      name: 'a Critical outside the rework fix delta blocks with the ledger',
+      input: inputFor([...reworkOutside.rounds, reworkOutsideFix], fixtureProjectConfig(), { findingAnnotations: outsideAnnotations }),
+      expected: ['block', false],
+      expectedCode: 'POLICY_DENIED',
+    },
+    {
+      name: 'a Critical outside the delta of the round after the re-plan blocks with the ledger',
+      input: inputFor([...replanOutside.rounds, ...replanOutsideRounds], fixtureProjectConfig(), { findingAnnotations: outsideAnnotations }),
+      expected: ['block', false],
+      expectedCode: 'POLICY_DENIED',
     },
     {
       name: 'the re-plan round reviews the complete artifact',
@@ -2747,6 +3151,79 @@ function selfTest() {
       expected: true,
     },
     {
+      // SPEC-review-rounds §5a, through the builder: the hand-off names its
+      // round and evidence; a rework bound to them admits one fix round,
+      // which the closing round inherits; a stale or foreign one is refused.
+      name: 'the builder admits an authorized rework after the hand-off and carries it to the closing round',
+      actual: (() => {
+        if (!builtFirst.ok) return false;
+        let evidence = builtFirst.evidence;
+        const next = (round, options) => appendRound(evidence, reviewed(failWith([finding])), {
+          scope: 'delta',
+          checkout: builderCheckout(`rework-${round}`),
+          artifactFingerprint: hash(`rework-tree-${round}`),
+          dispatchId: `rework-${round}`,
+          findingAnnotations: [{ ...verifiedIn(finding.id), predicate: 'rule:gate' }],
+          dispositions: [{ findingId: finding.id, disposition: 'fix', rationale: 'Fixed again.' }],
+          ...options,
+        });
+        for (const round of [2, 3, 4]) {
+          const built = next(round, {});
+          if (built.ok !== true) return false;
+          evidence = built.evidence;
+        }
+        const handoff = next(5, { scope: 'full', planFingerprint: hash('plan-rework-v2') });
+        if (handoff.code !== 'REVIEW_OPEN_FINDINGS') return false;
+        const transition = reviewTransition(handoff.evidence);
+        const grant = {
+          kind: 'answer', issue: 1, comment: 'https://example.test/acme/widgets/issues/1#issuecomment-88',
+          round: transition.round, evidenceFingerprint: transition.reviewEvidenceFingerprint,
+        };
+        const fix = (options) => appendRound(handoff.evidence, reviewed(pass), {
+          scope: 'delta',
+          checkout: builderCheckout('rework-6'),
+          artifactFingerprint: hash('rework-tree-6'),
+          dispatchId: 'rework-6',
+          findingAnnotations: [],
+          dispositions: [{ findingId: finding.id, disposition: 'fix', rationale: 'Reworked.' }],
+          ...options,
+        });
+        const foreign = fix({ reworkAuthorization: { ...grant, evidenceFingerprint: hash('another hand-off') } });
+        const otherRound = fix({ reworkAuthorization: { ...grant, round: 4 } });
+        const notHandoff = appendRound(builtFirst.evidence, reviewed(pass), {
+          scope: 'delta', checkout: builderCheckout('rework-early'), artifactFingerprint: hash('rework-early'), dispatchId: 'rework-early',
+          findingAnnotations: [], dispositions: [{ findingId: finding.id, disposition: 'fix', rationale: 'Fixed.' }],
+          reworkAuthorization: { ...grant, round: 1, evidenceFingerprint: hashValue(builtFirst.evidence.reviewRounds[0]) },
+        });
+        const fixed = fix({ reworkAuthorization: grant });
+        if (fixed.ok !== true) return false;
+        const closed = appendEscalationRound(fixed.evidence, reviewed(pass), { dispatchId: 'rework-7' });
+        if (closed.ok !== true) return false;
+        const last = closed.evidence.reviewRounds.at(-1);
+        const published = authorizeReviewPublication(closed.evidence, last.headOid, last.checkout);
+        const past = appendRound(closed.evidence, reviewed(pass), {
+          scope: 'full',
+          checkout: builderCheckout('rework-6'),
+          artifactFingerprint: hash('rework-tree-6'),
+          dispatchId: 'rework-8',
+          findingAnnotations: [],
+        });
+        return transition.round === 5
+          && transition.reviewEvidenceFingerprint === hashValue(handoff.evidence.reviewRounds.at(-1))
+          && foreign.ok === false && foreign.code === 'REWORK_NOT_AUTHORIZABLE'
+          && otherRound.ok === false && otherRound.code === 'REWORK_NOT_AUTHORIZABLE'
+          && notHandoff.ok === false && notHandoff.code === 'REWORK_NOT_AUTHORIZABLE'
+          && fixed.code === 'REVIEW_FULL_CLOSE_REQUIRED'
+          && JSON.stringify(fixed.evidence.reviewRounds.at(-1).reworkAuthorization) === JSON.stringify(grant)
+          && closed.code === 'REVIEW_CLEAN'
+          && JSON.stringify(last.reworkAuthorization) === JSON.stringify(grant)
+          && published.authorized === true
+          && JSON.stringify(published.reworkAuthorizations) === JSON.stringify([grant])
+          && past.ok === false && past.code === 'REVIEW_REWORK_SPENT';
+      })(),
+      expected: true,
+    },
+    {
       name: 'a round over the same artifact keeps its version, so a decision needs no commit',
       actual: (() => {
         if (!builtFirst.ok) return false;
@@ -2885,6 +3362,17 @@ function selfTest() {
           }],
         }));
         const deferred = defer('services/billing');
+        // Re-raised by the next reviewer, the deferral carries with its seam.
+        const reraised = appendRound(builtFirst.evidence, reviewed(failWith([finding])), secondOptions({
+          scope: 'full',
+          checkout: builderCheckout('b-1'),
+          artifactFingerprint: hash('tree-1'),
+          findingAnnotations: [verifiedIn(finding.id)],
+          dispositions: [{ findingId: finding.id, disposition: 'defer', rationale: 'Filed as follow-up #77.', seam: 'services/billing' }],
+        }));
+        const carried = reraised.ok !== true ? reraised : appendRound(reraised.evidence, reviewed(pass), {
+          scope: 'full', checkout: builderCheckout('b-3'), artifactFingerprint: hash('tree-3'), dispatchId: 'builder-3', findingAnnotations: [],
+        });
         const widened = appendRound(builtFirst.evidence, reviewed(pass), secondOptions({
           deltaPaths: ['services/orders/lib/y.mjs'],
           dispositions: [{ findingId: finding.id, disposition: 'widen', paths: ['services/orders/lib/y.mjs'], rationale: 'Inside the seam.' }],
@@ -2893,6 +3381,7 @@ function selfTest() {
           && deferred.ok === true && deferred.code === 'REVIEW_CLEAN'
           && deferred.evidence.reviewRounds[1].priorFindings[0].seam === 'services/billing'
           && reviewTransition(deferred.evidence).deferredFindings[0].findingId === finding.id
+          && carried.ok === true && carried.evidence.reviewRounds[2].priorFindings[0].seam === 'services/billing'
           && defer(undefined).ok === false
           && widened.ok === true && widened.code === 'REVIEW_FULL_CLOSE_REQUIRED';
       })(),
@@ -3058,11 +3547,22 @@ function selfTest() {
           const replan = cli('--result-file', failing, '--evidence-file', join(scratch, last), '--scope', 'full',
             '--plan-fingerprint', hash('plan-cli-v2'), '--dispositions-file', fixes, '--annotations-file', annotations,
             '--out', join(scratch, 'ev-replan.json'));
+          // A rework the hand-off admits, through its file.
+          const handoff = reviewTransition(evidence('ev-replan.json'));
+          const grant = input('rework.json', {
+            kind: 'answer', issue: 1, comment: 'https://example.test/acme/widgets/issues/1#issuecomment-88',
+            round: handoff.round, evidenceFingerprint: handoff.reviewEvidenceFingerprint,
+          });
+          file('src/a.mjs', 'reworked\n');
+          git('commit', '--quiet', '-am', 'rework');
+          const reworked = cli('--result-file', passing, '--evidence-file', join(scratch, 'ev-replan.json'), '--scope', 'delta',
+            '--dispositions-file', fixes, '--rework-authorization-file', grant, '--out', join(scratch, 'ev-rework.json'));
           return boundaryBuilt
             && uncovered.ok === false && uncovered.code === 'REVIEW_DELTA_SCOPE_INCOMPLETE'
             && coveredPaths
             && codes.join(',') === 'REVIEW_FIX_DELTA_REQUIRED,REVIEW_FIX_DELTA_REQUIRED,REVIEW_REPLAN'
-            && replan.ok === true && replan.code === 'REVIEW_OPEN_FINDINGS';
+            && replan.ok === true && replan.code === 'REVIEW_OPEN_FINDINGS'
+            && reworked.ok === true && reworked.code === 'REVIEW_FULL_CLOSE_REQUIRED';
         } finally {
           rmSync(root, { recursive: true, force: true });
           rmSync(scratch, { recursive: true, force: true });
@@ -3245,7 +3745,7 @@ function appendRoundMain(args) {
     + '--state <base>/.autoloop/config.json [--base-oid <oid>] [--boundary-file <plan-result.json>] '
     + '[--implement-result-file <implement-result.json>] | --evidence-file <path> '
     + '--scope full|delta [--dispositions-file <path>] '
-    + '[--plan-fingerprint <sha256 of the re-plan>]) '
+    + '[--plan-fingerprint <sha256 of the re-plan>] [--rework-authorization-file <path>]) '
     + '[--annotations-file <path>] [--checkout <dir>] [--out <path>]\n';
   const resultFile = flagValue(args, '--result-file');
   const first = args.includes('--first-round');
@@ -3277,6 +3777,10 @@ function appendRoundMain(args) {
       ...(first || flagValue(args, '--plan-fingerprint') === null
         ? {}
         : { planFingerprint: flagValue(args, '--plan-fingerprint') }),
+      // The rework a hand-off took (unit.mjs --rework-authorization writes it).
+      ...(flagValue(args, '--rework-authorization-file') === null
+        ? {}
+        : { reworkAuthorization: readJsonFile(flagValue(args, '--rework-authorization-file')) }),
     };
     if (first) {
       const projectConfig = projectConfigForReview(flagValue(args, '--state') ?? '');

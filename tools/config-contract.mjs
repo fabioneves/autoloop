@@ -452,7 +452,7 @@ function validateProjectValues(cfg, expectedVersion, errors) {
 
 export function validateConfig(cfg) {
   const errors = [];
-  if (!validateObjectShape(cfg, '', PROJECT_KEYS, ['protectedPaths', 'models', 'ui'], errors)) return errors;
+  if (!validateObjectShape(cfg, '', PROJECT_KEYS, ['protectedPaths', 'models', 'ui', 'autoDecide'], errors)) return errors;
   validateProjectValues(cfg, CONFIG_VERSION, errors);
   if (hasOwn(cfg, 'protectedPaths')) validateGlobList(cfg.protectedPaths, 'protectedPaths', errors);
   // Each step's model, effort and fallback, overriding the operator's global
@@ -463,15 +463,17 @@ export function validateConfig(cfg) {
     && hasOwn(cfg.ui, 'status') && typeof cfg.ui.status !== 'boolean') {
     errors.push('ui.status: must be true or false');
   }
+  // docs/specs/SPEC-auto-decide.md
+  if (hasOwn(cfg, 'autoDecide') && typeof cfg.autoDecide !== 'boolean') errors.push('autoDecide: must be true or false');
   return errors;
 }
 
 // What a review round fingerprints: the project's policy, without its model
-// table or display preferences. Routing is not reviewed policy, and each
-// dispatch result stamps the model it actually ran.
+// table, display preferences or auto-decide. Routing is not reviewed policy,
+// and each dispatch result stamps the model it actually ran.
 export function reviewedConfig(cfg) {
   if (!isRecord(cfg)) return cfg;
-  const { models, ui, ...reviewed } = cfg;
+  const { models, ui, autoDecide, ...reviewed } = cfg;
   return reviewed;
 }
 
@@ -541,6 +543,11 @@ export const DEFAULT_CONFIG = Object.freeze({
 // resolved config keeps the hash it had, as with protectedPaths.
 export function statusBandEnabled(config) {
   return config?.ui?.status !== false;
+}
+
+// Auto-decide is on unless the project turns it off; no default key, as ui.
+export function autoDecideEnabled(config) {
+  return config?.autoDecide !== false;
 }
 
 // The plugin's own review checklist, for a repository that keeps none.
@@ -2279,6 +2286,22 @@ function selfTest() {
     }
     expect('the reviewed config leaves ui out of the review fingerprint',
       JSON.stringify(reviewedConfig({ ...projectFixture(), ui: { status: false } })) === JSON.stringify(projectFixture()));
+    // SPEC-auto-decide: a question takes the recommendation unless the project
+    // turns that off. Optional, no default key, outside the review fingerprint.
+    {
+      const minimalText = JSON.stringify({ version: CONFIG_VERSION, baseBranch: 'main', gate: { command: 'x' } });
+      const off = resolveConfigText(JSON.stringify({ ...JSON.parse(minimalText), autoDecide: false }));
+      expect('autoDecide is an optional boolean, absent unless set',
+        validateConfig({ ...projectFixture(), autoDecide: true }).length === 0
+          && validateConfig({ ...projectFixture(), autoDecide: false }).length === 0
+          && validateConfig({ ...projectFixture(), autoDecide: 'no' }).includes('autoDecide: must be true or false')
+          && !Object.hasOwn(resolveConfigText(minimalText).config, 'autoDecide') && off.config.autoDecide === false);
+      expect('auto-decide is on unless autoDecide is false',
+        autoDecideEnabled(resolveConfigText(minimalText).config) === true && autoDecideEnabled(off.config) === false
+          && autoDecideEnabled(null) === true);
+      expect('the reviewed config leaves autoDecide out of the review fingerprint',
+        JSON.stringify(reviewedConfig({ ...projectFixture(), autoDecide: false })) === JSON.stringify(projectFixture()));
+    }
     expect('protectedPaths holds repository-relative globs',
       validateConfig({ ...projectFixture(), protectedPaths: ['spec/**', 'compose.y*ml', '**/compose.y*ml'] }).length === 0
         && validateConfig({ ...projectFixture(), protectedPaths: [] }).length === 0);

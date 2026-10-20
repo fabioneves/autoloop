@@ -60,6 +60,7 @@ export const UNIVERSAL_TOOL_FILES = Object.freeze([
   'release-verify.mjs',
   'review-contract.mjs',
   'scan.mjs',
+  'scratch.mjs',
   'setup.mjs',
   'sizing-contract.mjs',
   'snapshot-contract.mjs',
@@ -462,11 +463,11 @@ function checkSkillInvocation(root) {
 // skill and lower its budget in the same commit; raising one is a visible edit.
 export const SKILL_BUDGETS = Object.freeze({
   'codebase-design': 6442,
-  dev: 57266, // +334 (0.71.0, operator raised it): ribbon once, paused and the control prompt, --pr on publish, prime's controls keys; -235 (0.69.0): removed-rule prose dropped, decisions prose added; -103: work-size guidance removed; +46 (0.66.0): --resumed --result, the finished line; +97 (0.65.9): a reconcile MERGE_PENDING runs auto-merge once; +176 (0.65.1): base worktrees by commit, the lifecycle root's node id, no ANTHROPIC_BASE_URL on a dispatch
+  dev: 58931, // +1665 (0.72.1): auto-decide — matters, --instead-of, the one rework; checkouts on disk through scratch.mjs, never under /tmp; the per-issue lifecycle request; prime's scratch and retiredMarks keys; the rework after a review hand-off and its refusals; +334 (0.71.0, operator raised it): ribbon once, paused and the control prompt, --pr on publish, prime's controls keys; -235 (0.69.0): removed-rule prose dropped, decisions prose added; -103: work-size guidance removed; +46 (0.66.0): --resumed --result, the finished line; +97 (0.65.9): a reconcile MERGE_PENDING runs auto-merge once; +176 (0.65.1): base worktrees by commit, the lifecycle root's node id, no ANTHROPIC_BASE_URL on a dispatch
   'lean-code': 3873,
-  pitcrew: 19587, // -197 (0.69.0): removed-rule prose dropped, retired block reasons
+  pitcrew: 19755, // +168 (0.72.1): --matter and auto-decide; -197 (0.69.0): removed-rule prose dropped, retired block reasons
   'queue-trace': 6929,
-  setup: 13860,
+  setup: 13999, // +139 (0.72.1): the optional autoDecide key
   shape: 26272,
 });
 

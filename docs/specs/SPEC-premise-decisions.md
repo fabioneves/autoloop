@@ -6,7 +6,8 @@ Module: `premise-decisions` in [Flow](SPEC-flow.md).
 
 A specification gap is decided by the loop and recorded on the issue, so the operator reviews the
 decision in the pull request. A block is used only when the loop needs something it must not
-create: a secret, an irreversible external action, or a policy exception.
+create: a secret, an irreversible external action, or a policy exception. While `autoDecide` is on,
+a policy exception that is not hard safety is a decision too ([Auto-decide](SPEC-auto-decide.md)).
 
 ## Current state
 

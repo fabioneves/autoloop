@@ -32,6 +32,7 @@ import {
   realpathSync,
   rmSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -41,7 +42,7 @@ import { vendoredLeftovers } from './hook-root.mjs';
 import { closeLatch, latchDirectory, processStart, recordHostSession, recordLatch, sessionOwnerPid, takeHostSession } from './run-markers.mjs';
 import { ancestorPids, liveRunsElsewhere, sessionLineage, loopRunIsLive, loopRunIsOpen, ownedRun, ownRunMarkers, pinnedModelsPath, processAlive, runMarkerDirectory } from './run-markers.mjs';
 import {
-  effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig, reviewedConfig,
+  autoDecideEnabled, effectiveChecklistPath, LEGACY_STATE_FILE, PLUGIN_CHECKLIST, resolveProjectConfig, reviewedConfig,
 } from './config-contract.mjs';
 import { hashValue } from './review-contract.mjs';
 import { snapshotExecutionRepository } from './checkout-contract.mjs';
@@ -50,6 +51,7 @@ import {
   completeSection,
   createSnapshot,
   eligibleIssueNumbers,
+  incompleteSection,
   issueSnapshotItem,
   haltIssueNumbers,
   markerSchedule,
@@ -57,12 +59,14 @@ import {
 } from './snapshot-contract.mjs';
 import { answeredMarker, liftWaits, postDigest, realRun, triageBlocks } from './unit.mjs';
 import { dispatchInheritance } from './inherited-dispatch.mjs';
+import { retireRefusedMarks } from './step.mjs';
+import { liveUses, pruneScratch, scratchRoot } from './scratch.mjs';
 import { appendEvent, currentRunId, emitEvent, isPaused, readEvents, resolveCommonDir, setPaused, setRunId, takeControls, writeControl } from './events-contract.mjs';
 import { pinModels, readPinnedModels, resolveModels } from './models-config.mjs';
 
 // Bumped by every release together with the other version literals; the
 // release verifier requires this literal to equal VERSION.
-const AUTOLOOP_VERSION = '0.72.0';
+const AUTOLOOP_VERSION = '0.72.1';
 
 const MAX_CHILD_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_SCAN_ARGS = 8;
@@ -240,6 +244,8 @@ export function primeDev({
     return failure('run', 'RUN_LATCH_UNCONFIRMED', 'this Claude process holds a run latch open for another conversation '
       + '(/clear started this one), so the run is not opened. Close it with `prime.mjs --close-run`, then prime again.');
   }
+  // Only a run that opens prunes.
+  const scratch = openScratch(root);
   // A live own marker before this prime means the same run goes on; none
   // means a new run, whose predecessor ended without --close-run (an exit,
   // a kill, a restart): its id is abandoned so the new run's events are its own.
@@ -303,6 +309,7 @@ export function primeDev({
     config: configSummary(config, root),
     ...models,
     base,
+    scratch,
     runMarker,
     waits,
     blocks,
@@ -311,6 +318,16 @@ export function primeDev({
     timings: { scanMs, primeMs: Date.now() - PROCESS_START_MS },
     snapshot,
   };
+}
+
+// The run's on-disk scratch root (scratch.mjs), pruned of the worktrees
+// nothing uses. A failure is reported, never fatal: the run needs no scratch.
+function openScratch(root) {
+  try {
+    return { root: scratchRoot(root), ...pruneScratch(root) };
+  } catch (error) {
+    return { root: null, removed: [], error: error.message };
+  }
 }
 
 // The controls prime consumes: pause and unpause keep the paused marker;
@@ -427,6 +444,7 @@ export function configSummary(config, root = null) {
     gateCommand: config.gate.command,
     checklistPath: config.review.checklistPath,
     checklistFile: root === null ? null : effectiveChecklistPath(root, config),
+    autoDecide: autoDecideEnabled(config),
     fingerprint: hashValue(reviewedConfig(config)),
     projectConfig: reviewedConfig(config),
   };
@@ -632,6 +650,10 @@ export function persistPrimeSnapshot(result, cwd = process.cwd()) {
   const bytes = `${JSON.stringify(result.snapshot, null, 1)}\n`;
   writeFileSync(snapshotPath, bytes);
   const { snapshot, ...compact } = result;
+  const schedule = markerSchedule(snapshot);
+  const refusals = readMarkerRefusals(dirname(directory));
+  // Named in the summary, so the run record says which marks left the views.
+  const retiredMarks = retireRefusedMarks({ dir: dirname(directory), issues: schedule?.deferred, refusals });
   return {
     ...compact,
     snapshotPath,
@@ -640,11 +662,12 @@ export function persistPrimeSnapshot(result, cwd = process.cwd()) {
     eligible: result.paused === true ? [] : eligibleIssueNumbers(snapshot),
     halted: haltIssueNumbers(snapshot),
     markers: splitKnownRefused(
-      markerSchedule(snapshot),
+      schedule,
       snapshot.sections.lifecycleMarkers?.items ?? [],
-      readMarkerRefusals(dirname(directory)),
+      refusals,
       lifecycleDriverIdentity(),
     ),
+    retiredMarks,
     sections: sectionSummary(snapshot),
     // A dispatch whose session ended is this run's to collect, not to stop
     // (inherited-dispatch.mjs); one a live session owns is left alone.
@@ -767,6 +790,11 @@ export function blockLines(blocks, halted = null) {
   ];
 }
 
+export function configLine(config) {
+  return `config ${config.version}  merge ${config.mergePolicy}`
+    + `  auto-decide ${config.autoDecide ? 'on' : 'off'}  gate ${config.gateCommand}`;
+}
+
 function report(summary) {
   if (summary.ok !== true) {
     return `prime ${summary.step} FAILED  ${summary.error.code}\n${summary.error.message}`;
@@ -778,8 +806,8 @@ function report(summary) {
     `base   ${summary.base.baseBranch}`
     + `  on-base ${summary.base.onBase ? 'yes' : 'no'}`
     + `  behind ${summary.base.behindRemoteBase ?? '?'}`,
-    `config ${summary.config.version}  merge ${summary.config.mergePolicy}`
-    + `  gate ${summary.config.gateCommand}`,
+    configLine(summary.config),
+    `scratch ${summary.scratch.root ?? `unavailable: ${summary.scratch.error}`}`,
     `scan   ${summary.timings.scanMs}ms  prime ${summary.timings.primeMs}ms`
     + `  snapshot ${summary.snapshotBytes}B -> ${summary.snapshotPath}`,
     ...haltLines(summary.halted),
@@ -959,6 +987,14 @@ function selfTest() {
     && configSummary(Object.fromEntries(
       Object.entries(fixtureConfig()).reverse(),
     )).fingerprint === summary.fingerprint,
+  );
+  check(
+    'the summary names whether a question takes its recommendation (autoDecide), outside the fingerprint',
+    summary.autoDecide === true
+      && configSummary({ ...fixtureConfig(), autoDecide: false }).autoDecide === false
+      && configSummary({ ...fixtureConfig(), autoDecide: false }).fingerprint === summary.fingerprint
+      && configLine(summary).includes('  auto-decide on  ')
+      && configLine(configSummary({ ...fixtureConfig(), autoDecide: false })).includes('  auto-decide off  '),
   );
   check(
     'the summary names the checklist file reviewers read, outside the fingerprinted config',
@@ -1185,6 +1221,60 @@ function selfTest() {
           && outcome.refused[0].control === 'merge PR #4242' && outcome.refused[0].reason.startsWith('merge gate: ');
       })(),
     );
+    // LFE, 2026-10-16: a refused closed issue kept its reconcile mark in every
+    // parked view. Prime retires it where it reads the refusal, also when a
+    // plugin update changed the driver and the marker is retried. An open
+    // issue's mark, or any mark without a complete open-issue list, stays.
+    check(
+      'prime retires the open reconcile mark of a refused closed issue, whichever driver refused it',
+      (() => {
+        const autoloop = join(root, '.git', 'autoloop');
+        const refusedAtMs = Date.parse('2026-01-01T12:00:00Z');
+        const marker = (issue) => ({ issueNumber: issue, id: `IC_${issue}`, tipId: `IC_${issue}`, sequence: 0,
+          author: 'autoloop', authorAssociation: 'MEMBER', createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z', url: `https://example.test/issues/${issue}#issuecomment-1`,
+          body: `<!-- autoloop-lifecycle-v1\n{"branch":"feat/gh-${issue}-contract","intentSource":"invocation","issue":${issue},`
+            + `"issueBodyHash":"${'b'.repeat(64)}","mergePolicy":"manual","phase":"intent-recorded","planHash":"${'c'.repeat(64)}",`
+            + `"plannedBaseOid":"${'a'.repeat(40)}","runIntentHash":"${'d'.repeat(64)}","selector":"native","v":1}\n-->` });
+        const open = issueSnapshotItem({ number: 271, title: 'open', body: 'b', updatedAt: '2026-01-01T00:00:00Z',
+          lastEditedAt: null, labels: ['loop-waiting'] });
+        const snapshotWith = (openIssues) => {
+          const sections = Object.fromEntries(SNAPSHOT_SECTIONS.map((name) => [name, completeSection([])]));
+          sections.repo = completeSection([{ owner: 'o', name: 'r', nameWithOwner: 'o/r', defaultBranch: 'main' }]);
+          sections.tree = completeSection([{ dirtyEntries: [], dirtyPaths: 0, branch: 'main', headOid: 'a'.repeat(40) }]);
+          sections.lifecycleMarkers = completeSection([marker(270), marker(271)]);
+          sections.openIssues = openIssues;
+          return createSnapshot({ scannedAt: '2026-01-02T00:00:00.000Z', sections });
+        };
+        const seed = () => {
+          mkdirSync(join(autoloop, 'marker-refusals'), { recursive: true });
+          mkdirSync(join(autoloop, 'steps'), { recursive: true });
+          for (const issue of [270, 271]) {
+            writeFileSync(join(autoloop, 'marker-refusals', `${issue}.json`),
+              JSON.stringify({ code: 'PREMERGE_CI_COMPONENT_MISMATCH', atMs: refusedAtMs, driver: 'an-older-driver' }));
+            writeFileSync(join(autoloop, 'steps', `${issue}.json`),
+              JSON.stringify({ issue, steps: [{ step: '00-reconcile', startedAtMs: refusedAtMs - 30_000 }] }));
+          }
+        };
+        const closed = (issue) => JSON.parse(readFileSync(join(autoloop, 'steps', `${issue}.json`), 'utf8')).closed;
+        const persist = (openIssues) => persistPrimeSnapshot(
+          { ok: true, paused: false, checkout: { headOid: 'e'.repeat(40) }, snapshot: snapshotWith(openIssues) }, root);
+        try {
+          seed();
+          const unknown = persist(incompleteSection('SCAN_FAILED', 'open issues failed', [open]));
+          const unknownKept = [270, 271].every((issue) => closed(issue) === undefined);
+          const persisted = persist(completeSection([open]));
+          return unknownKept && unknown.markers === null && JSON.stringify(unknown.retiredMarks) === '[]'
+            && JSON.stringify(persisted.markers?.deferred) === '[270]' && persisted.markers.knownRefused.length === 0
+            && JSON.stringify(persisted.retiredMarks) === '[270]'
+            && closed(270)?.outcome === 'refused' && closed(270).code === 'PREMERGE_CI_COMPONENT_MISMATCH'
+            && closed(271) === undefined;
+        } finally {
+          rmSync(join(autoloop, 'marker-refusals'), { recursive: true, force: true });
+          for (const issue of [270, 271]) rmSync(join(autoloop, 'steps', `${issue}.json`), { force: true });
+        }
+      })(),
+    );
     const base = baseSyncFacts(root, 'main');
     check(
       'base facts report the live branch and a missing remote base honestly',
@@ -1291,7 +1381,21 @@ function selfTest() {
         const exited = spawnSync(process.execPath, ['-e', '0'], { timeout: 10000 }).pid;
         const noStart = primeDev({ ...quiet, owner: exited });
         recordHostSession({ sessionId: 'S-host', directory: latches });
+        // LFE, 2026-10-15: checkouts on the /tmp tmpfs filled its inodes. A
+        // scratch worktree under the repository nothing uses and older than
+        // the grace time is pruned when the run opens.
+        const oldScratch = join(root, '.git', 'autoloop', 'scratch', 'base-old');
+        spawnSync('git', ['-C', root, 'worktree', 'add', '-q', '--detach', oldScratch, 'HEAD']);
+        const planted = existsSync(join(oldScratch, '.git'));
+        const beforeGrace = new Date(Date.now() - 3 * 3600_000);
+        if (planted) utimesSync(join(oldScratch, '.git'), beforeGrace, beforeGrace);
         const opened = primeWith('S-host');
+        // Pruned only where the process table can be read (macOS has no
+        // /proc: CI run 39280099232); elsewhere the worktree stays.
+        const listed = spawnSync('git', ['-C', root, 'worktree', 'list'], { encoding: 'utf8' }).stdout.includes('base-old');
+        const prunedAtOpen = planted && (liveUses() === null
+          ? existsSync(oldScratch) && listed
+          : !existsSync(oldScratch) && !listed);
         const bound = latchOf()?.sessionId;
         // Re-audit N1: the hand-off is single-use. A prime the guard did not
         // recognise (env -u …, sh -c …, node --stack-size …, a script) gets
@@ -1314,6 +1418,7 @@ function selfTest() {
           && rebinding.ok === false && rebinding.error.code === 'RUN_LATCH_UNCONFIRMED' && !existsSync(markerDirectory)
           && latchOf()?.sessionId === 'S-host' && guard.status === 2,
         );
+        check('prime prunes an unused old scratch worktree when the run opens', prunedAtOpen);
         // After --close-run and /clear (session S2): an unrecognised prime
         // finds no hand-off, nor a stale one, and reopens nothing; a prime the
         // guard saw in S2 opens S2's run.
